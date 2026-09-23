@@ -1,0 +1,24 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+.env
+
+# Runtime artifacts are intentionally never committed.
+runtime/
+demo-results/
+*.log
+
+# Only the two curated databases under data/demo/db are versioned.
+data/**/*.sqlite
+!data/demo/
+!data/demo/db/
+!data/demo/db/rule.sqlite
+!data/demo/db/knowledge.sqlite
+
+data/demo/db/*.sqlite-wal
+data/demo/db/*.sqlite-shm
