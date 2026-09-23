@@ -7,6 +7,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # This workflow validates contracts only. It must not download an
+      # optional embedding model or require network/model credentials.
+      MAIN_PART_FRONTEND_VECTORIZE: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
