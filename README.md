@@ -1,5 +1,7 @@
 # Event Reasoning Demo v0.1
 
+[English README](README_EN.md)
+
 这是一个可以直接运行的事件图推理演示版本：前端 LLM 只把自然语言翻译为规范 Event Graph；后端用 Knowledge 证明可补全条件、用 Rule 网络逐步推理；最后只把 Control 放行的结果改写为用户可读回答。
 
 本项目采用 [Apache License 2.0](LICENSE)。
@@ -15,8 +17,8 @@
 
 完整的设计动机、feature 表示、Knowledge/Rule 分工、严格匹配、Control、Calculator、Memory、Output Gate 和当前边界，请看：
 
-- [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.md)
-- [Technical overview (English)](docs/TECHNICAL_EXPLANATION.en.md)
+- [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
+- [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
 - [模块边界](docs/ARCHITECTURE.md)
 
 ## 快速开始
@@ -24,7 +26,7 @@
 要求：Python 3.11+、可用的 PyTorch 环境，以及一个可访问 SiliconFlow 的 API Key。前端模型固定为 `Qwen/Qwen3-8B`。
 
 ```bash
-cd demo-v0.1
+cd Event-reasoning-demo-v1
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
