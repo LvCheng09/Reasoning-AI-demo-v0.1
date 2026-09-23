@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | Knowledge | `data/demo/db/knowledge.sqlite` | Vector-based core–relation–nature definitions used to prove whether a missing required condition is present in the current graph. |
 | Rule | `data/demo/db/rule.sqlite` | Rules that transform strictly matched input spans into derived spans or numeric outputs. |
-| Memory | Runtime only | Historical cases and execution choices. It is not shipped; 本版本不包含学习模块。 |
+| Memory | Runtime only | Historical cases and execution choices.  |
 
 ## Execution rule
 
