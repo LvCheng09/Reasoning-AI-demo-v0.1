@@ -7,6 +7,12 @@ from main_part.event_graph_contract import validate_event_graph_contract
 from main_part.data_structure import WorkingMemoryState
 
 
+@pytest.fixture(autouse=True)
+def _disable_network_vector_loading(monkeypatch):
+    """Keep contract tests independent of a downloadable embedding model."""
+    monkeypatch.setenv("MAIN_PART_FRONTEND_VECTORIZE", "0")
+
+
 def test_default_db_paths_use_dso_product_database(monkeypatch):
     monkeypatch.delenv("MAIN_PART_DB_DIR", raising=False)
     paths = _default_db_paths()
