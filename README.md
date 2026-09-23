@@ -1,4 +1,4 @@
-# Event Reasoning Demo v0.1
+# Reasoning-AI-demo-v0.1
 
 [English README](README_EN.md)
 
@@ -26,7 +26,7 @@
 要求：Python 3.11+、可用的 PyTorch 环境，以及一个可访问 SiliconFlow 的 API Key。前端模型固定为 `Qwen/Qwen3-8B`。
 
 ```bash
-cd Event-reasoning-demo-v1
+cd Reasoning-AI-demo-v0.1
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip

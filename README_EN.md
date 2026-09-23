@@ -1,4 +1,4 @@
-# Event Reasoning Demo v0.1
+# Reasoning-AI-demo-v0.1
 
 [中文 README](README.md)
 
@@ -26,8 +26,8 @@ For the design rationale, feature representation, Knowledge/Rule separation, str
 Requirements: Python 3.11+, a working PyTorch environment, and a SiliconFlow API key. The frontend model is fixed to `Qwen/Qwen3-8B`.
 
 ```bash
-git clone git@github.com:LvCheng09/Event-reasoning-demo-v1.git
-cd Event-reasoning-demo-v1
+git clone git@github.com:LvCheng09/Reasoning-AI-demo-v0.1.git
+cd Reasoning-AI-demo-v0.1
 
 python -m venv .venv
 source .venv/bin/activate

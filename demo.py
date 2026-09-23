@@ -162,7 +162,7 @@ def _report(
 
 
 def _print_human_report(report: dict[str, Any]) -> None:
-    print("\n=== Event Reasoning Demo v0.1 ===")
+    print("\n=== Reasoning-AI-demo-v0.1 ===")
     print(f"问题: {report['question']}")
     print(f"状态: {report['scheduler_status']}")
     if report.get("blocking_reason"):
