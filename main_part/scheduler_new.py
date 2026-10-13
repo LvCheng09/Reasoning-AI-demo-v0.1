@@ -1405,6 +1405,9 @@ class SchedulerNew:
                         "operation": "output",
                         "control_completion_checked": True,
                         "control_completion_decision": "allow_output",
+                        "output_gate_checked": True,
+                        "output_gate_decision": "allow_current_candidate",
+                        "output_gate_rule_ids": [rule_id],
                         "completion_control_rule_ids": [rule_id],
                         "output_authority": "active_control_completion",
                     }

@@ -9,6 +9,21 @@ import os
 from pathlib import Path
 import sqlite3
 import tempfile
+from collections.abc import Mapping
+
+
+def validate_runtime_db_paths(paths: Mapping) -> dict:
+    """Never open a released seed for writing, including symlinks/hardlinks."""
+    seeds = Path(__file__).resolve().parents[1] / "data" / "demo" / "db"
+    protected = list(seeds.glob("*.sqlite"))
+    for value in paths.values():
+        if not isinstance(value, (str, os.PathLike)) or not str(value).strip():
+            continue
+        candidate = Path(value).expanduser().resolve()
+        for seed in protected:
+            if candidate == seed.resolve() or (candidate.exists() and candidate.samefile(seed)):
+                raise ValueError("runtime database must not point at a released seed; use a writable copy")
+    return dict(paths)
 
 
 def prepare_runtime_databases(
@@ -53,6 +68,6 @@ def default_db_paths() -> dict[str, str]:
         for name in ("rule", "knowledge"):
             if not (path / f"{name}.sqlite").is_file():
                 raise FileNotFoundError(f"configured runtime database is missing: {path / (name + '.sqlite')}")
-        return {name: str(path / f"{name}.sqlite") for name in ("rule", "knowledge", "memory")}
+        return validate_runtime_db_paths({name: str(path / f"{name}.sqlite") for name in ("rule", "knowledge", "memory")})
     configured_root = os.getenv("MAIN_PART_RUNTIME_DIR", "").strip()
     return prepare_runtime_databases(runtime_root=Path(configured_root) if configured_root else None)

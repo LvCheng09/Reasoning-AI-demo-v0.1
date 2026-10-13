@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -16,7 +17,10 @@ from main_part.output_service import SemanticAnswerService
 from main_part.answer_verbalizer import PassthroughVerbalizer
 from semantic_frontend.adapter import runtime_graph
 from semantic_frontend.frontend import SimpleSemanticFrontend
-from semantic_frontend.examples import DSO_SOURCE, dso_example, SUPPLY_SOURCE, supply_chain_example
+from semantic_frontend.examples import (
+    DSO_SOURCE, dso_example, SUPPLY_SOURCE, supply_chain_example,
+    SUPPLY_SINGLE_SOURCE, supply_chain_single_example,
+)
 
 
 def seed_hashes():
@@ -31,7 +35,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError("use a new output path; previous evidence is never overwritten")
-    os.environ["MAIN_PART_FRONTEND_IMPLEMENTATION"] = "legacy"
+    os.environ["MAIN_PART_FRONTEND_IMPLEMENTATION"] = "semantic_v1"
     encoder = RuleVectorEncoder(encoder_name_or_path=args.embedding_model, local_files_only=True, load_encoder=True)
     original = seed_hashes()
     report = {"status": "running", "scope": "Authored release graphs with real cached Qwen vectors and Launcher/Scheduler; no external LLM, training or blind generalization claim.", "cases": []}
@@ -50,9 +54,20 @@ def main() -> int:
 def validate_cases(args, encoder, original, report, save) -> int:
     def forbidden_frontend(*args, **kwargs):
         raise RuntimeError("external frontend calls forbidden in release graph regression")
+    # A second authored goal over the same observation exercises multi-step
+    # composition. This is a graph fixture, not a claimed LLM extraction.
+    cash_flow = deepcopy(supply_chain_single_example())
+    cash_text = SUPPLY_SINGLE_SOURCE.replace("库存资金占用", "经营现金流压力")
+    goal = cash_flow["events"][-1]
+    goal.update(id="goal_operating_cash_flow_pressure", canonical_text="判断经营现金流压力",
+                source_span="请判断是否会形成经营现金流压力")
+    goal["span"].update(core="operating cash flow pressure objective", feature_type="goal_operating_cash_flow_pressure")
+    cash_flow["mainlines"][0]["event_ids"][-1] = goal["id"]
     for name, text, authored, expected_feature in (
         ("dso", DSO_SOURCE, dso_example(), "dso_result"),
         ("stockout", SUPPLY_SOURCE, supply_chain_example(), "stockout_exposure"),
+        ("inventory", SUPPLY_SINGLE_SOURCE, supply_chain_single_example(), "inventory_capital_tied_up"),
+        ("cash_flow", cash_text, cash_flow, "operating_cash_flow_pressure"),
     ):
         started = time.perf_counter()
         graph = runtime_graph(SimpleSemanticFrontend(None, None)._build_graph(name, text, authored))

@@ -35,84 +35,93 @@ def build_runtime_output_state(
     automatic target selectors.  In particular, this does not promote every
     derived span in a workspace into a final answer.
     """
+    def rejected(reason: str) -> tuple[dict[str, Any], list[str]]:
+        return {"event_graph": {"spans": [], "events": []},
+                "status": "unresolved", "reason": reason,
+                "unresolved_conditions": [reason]}, []
+
+    status = str((task_result or {}).get("status") or "").lower()
+    if status != "solved":
+        return rejected(str((task_result or {}).get("reason") or f"task_result:{status or 'unknown'}"))
+
+    selected = next((item for item in reversed(list(outputs or []))
+                     if isinstance(item, Mapping) and item.get("operation") == "output"), None)
+    if selected is None or selected.get("output_gate_checked") is not True:
+        return rejected("no_approved_output")
+    if selected.get("output_gate_decision") not in (None, "allow_current_candidate"):
+        return rejected("output_gate_not_allowed")
+
     raw_workspaces = getattr(working_memory, "event_workspaces", {})
     workspaces = raw_workspaces if isinstance(raw_workspaces, Mapping) else {}
-    spans_by_id: dict[str, dict[str, Any]] = {}
-    events: list[dict[str, Any]] = []
-
-    for raw_event_id, raw_workspace in workspaces.items():
-        if not isinstance(raw_workspace, Mapping):
-            continue
-        event_id = str(raw_workspace.get("event_id") or raw_event_id or "").strip()
-        if not event_id:
-            continue
-        event_span_ids: list[str] = []
-        for raw_span in raw_workspace.get("spans", []) or []:
-            if not isinstance(raw_span, Mapping):
-                continue
-            span = deepcopy(dict(raw_span))
-            span_id = str(span.get("span_id") or span.get("id") or "").strip()
-            if not span_id:
-                continue
-            span.setdefault("span_id", span_id)
-            spans_by_id[span_id] = span
-            event_span_ids.append(span_id)
-        for raw_span_id in raw_workspace.get("evidence_span_ids", []) or []:
-            span_id = str(raw_span_id or "").strip()
-            if span_id and span_id not in event_span_ids:
-                event_span_ids.append(span_id)
-        events.append(
-            {
-                "event_id": event_id,
-                "event_type": str(raw_workspace.get("event_type") or ""),
-                "evidence_span_ids": event_span_ids,
-                "relations": [
-                    deepcopy(dict(item))
-                    for item in raw_workspace.get("relations", []) or []
-                    if isinstance(item, Mapping)
-                ],
-            }
-        )
-
-    selected_output: Mapping[str, Any] = {}
-    for item in reversed(list(outputs or [])):
-        if isinstance(item, Mapping) and str(item.get("operation") or "") == "output":
-            selected_output = item
-            break
-
-    target_span_ids: list[str] = []
-    for raw_span_id in selected_output.get("conclusion_span_ids", []) or []:
-        span_id = str(raw_span_id or "").strip()
-        if span_id and span_id in spans_by_id and span_id not in target_span_ids:
-            target_span_ids.append(span_id)
-    for raw_span in selected_output.get("result_spans", []) or []:
+    scope_ids = {str(selected[key]) for key in ("event_id", "rendered_from_event_id")
+                 if selected.get(key)}
+    if len(scope_ids) > 1:
+        return rejected("conflicting_output_event_scope")
+    if scope_ids:
+        event_id = next(iter(scope_ids))
+        matches = [(key, ws) for key, ws in workspaces.items()
+                   if isinstance(ws, Mapping) and str(ws.get("event_id") or key) == event_id]
+    else:
+        matches = [(key, ws) for key, ws in workspaces.items() if isinstance(ws, Mapping)]
+    if len(matches) != 1:
+        return rejected("missing_or_ambiguous_output_event_scope")
+    key, workspace = matches[0]
+    event_id = str(workspace.get("event_id") or key)
+    spans_by_id = {}
+    for raw_span in workspace.get("spans", []) or []:
         if not isinstance(raw_span, Mapping):
             continue
-        span_id = str(raw_span.get("span_id") or raw_span.get("id") or "").strip()
-        if span_id and span_id in spans_by_id and span_id not in target_span_ids:
-            target_span_ids.append(span_id)
+        span = deepcopy(dict(raw_span))
+        span_id = str(span.get("span_id") or span.get("id") or "").strip()
+        if not span_id:
+            continue
+        if span_id in spans_by_id:
+            return rejected("duplicate_span_id_in_output_event")
+        span["span_id"] = span_id
+        spans_by_id[span_id] = span
 
-    target_feature_types: list[str] = []
-    raw_feature_types = selected_output.get("result_feature_type")
-    if isinstance(raw_feature_types, str):
-        raw_feature_types = [raw_feature_types]
-    for raw_feature_type in raw_feature_types or []:
-        feature_type = str(raw_feature_type or "").strip()
-        if feature_type and feature_type not in target_feature_types:
-            target_feature_types.append(feature_type)
+    target_ids = []
+    for raw_id in selected.get("conclusion_span_ids", []) or []:
+        span_id = str(raw_id or "").strip()
+        if not span_id or span_id not in spans_by_id:
+            return rejected("missing_approved_target")
+        if span_id not in target_ids:
+            target_ids.append(span_id)
+    for snapshot in selected.get("result_spans", []) or []:
+        if not isinstance(snapshot, Mapping):
+            return rejected("invalid_output_result_snapshot")
+        span_id = str(snapshot.get("span_id") or snapshot.get("id") or "").strip()
+        current = spans_by_id.get(span_id)
+        if current is None:
+            return rejected("missing_approved_target")
+        for field in ("core", "relation", "nature", "feature_type", "value", "unit",
+                      "computed_by_rule_id", "evidence_span_ids", "provenance"):
+            if field in snapshot and snapshot[field] != current.get(field):
+                return rejected("stale_or_conflicting_output_snapshot")
+        if span_id not in target_ids:
+            target_ids.append(span_id)
 
-    runtime_state: dict[str, Any] = {
-        "event_graph": {"spans": list(spans_by_id.values()), "events": events},
-        "output_target_feature_types": target_feature_types,
-    }
-    status = str((task_result or {}).get("status") or "").strip().lower()
-    if status and status != "solved":
-        reason = str((task_result or {}).get("reason") or "").strip()
-        runtime_state["status"] = "blocked" if status == "blocked" else status
-        runtime_state["reason"] = reason or f"task_result:{status}"
-        runtime_state["unresolved_conditions"] = [runtime_state["reason"]]
-    return runtime_state, target_span_ids
+    decoder = SemanticOutputDecoder()
+    if not target_ids:
+        features = selected.get("result_feature_type") or []
+        features = [features] if isinstance(features, str) else features
+        if not isinstance(features, (list, tuple)):
+            return rejected("invalid_output_feature_selector")
+        target_ids = [sid for sid, span in spans_by_id.items()
+                      if span.get("feature_type") in features and decoder._is_target_output_eligible(span)]
+    if not target_ids:
+        return rejected("no_approved_target")
+    if any(not decoder._is_target_output_eligible(spans_by_id[sid]) for sid in target_ids):
+        return rejected("approved_target_not_eligible")
 
+    state = {"event_graph": {"spans": list(spans_by_id.values()), "events": [{
+        "event_id": event_id,
+        "event_type": str(workspace.get("event_type") or ""),
+        "evidence_span_ids": list(spans_by_id),
+        "relations": [deepcopy(dict(item)) for item in workspace.get("relations", []) or []
+                      if isinstance(item, Mapping)],
+    }]}, "output_target_feature_types": []}
+    return state, target_ids
 
 class SemanticAnswerService:
     def __init__(self, *, decoder: SemanticOutputDecoder, verbalizer: Any):
@@ -163,13 +172,19 @@ class SemanticAnswerService:
             outputs=outputs,
             task_result=task_result,
         )
-        return self.answer(
-            runtime_state,
-            user_query=user_query,
-            target_span_ids=target_span_ids or None,
-            target_feature_types=(
-                runtime_state.get("output_target_feature_types") or None
-            ) if not target_span_ids else None,
-            language=language,
+        decoded = self.decoder.decode(runtime_state, target_span_ids=target_span_ids)
+        structured = decoded.to_dict()
+        # An unresolved run must not be promoted by a presentation model.
+        if not target_span_ids:
+            return AnswerResult(decoded.rough_text, decoded.rough_text, structured)
+        if decoded.status != "ok" or set(target_span_ids) != {s.span_id for s in decoded.target_spans}:
+            rejected = self.decoder.decode({
+                "event_graph": {"spans": [], "events": []},
+                "unresolved_conditions": ["approved_results_not_fully_decodable"],
+            })
+            return AnswerResult(rejected.rough_text, rejected.rough_text, rejected.to_dict())
+        answer = self.verbalizer.verbalize(
+            structured, user_query=user_query, language=language,
             style_instruction=style_instruction,
         )
+        return AnswerResult(answer, decoded.rough_text, structured)

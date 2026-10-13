@@ -38,19 +38,19 @@ patch_event_graph(*, game_input, current_event_graph, patches) -> dict
 ```bash
 export MAIN_PART_FRONTEND_IMPLEMENTATION=semantic_v1
 export LLM_BASE_URL=http://YOUR_LLM_SERVER:8000/v1
-export LLM_MODEL=YOUR_FIXED_MODEL
+export LLM_MODEL=Qwen/Qwen3-8B
 export LLM_API_KEY=YOUR_KEY
 ```
 
 然后沿用原来的 `MainPartModelLauncher(...).submit_input(text)`。
-未设置 implementation 时保留原前端，不静默切换现有实验；设置 semantic_v1 但未配置模型则明确报错。
+发布版只支持 semantic_v1 和 Qwen/Qwen3-8B，旧前端路由已删除。未配置API时，文字入口明确报错；submit_event_graph 图入口不创建LLM客户端，也不需要API配置。
 也可以直接注入，不需要环境变量：
 
 ```python
 from semantic_frontend import SemanticFrontendAdapter, SimpleSemanticFrontend, SingleSmallLLM
 from main_part.model_launcher import MainPartModelLauncher
 
-llm = SingleSmallLLM(base_url, model_name, api_key)
+llm = SingleSmallLLM(base_url, "Qwen/Qwen3-8B", api_key)
 adapter = SemanticFrontendAdapter(SimpleSemanticFrontend(llm, embedder=None))
 launcher = MainPartModelLauncher(frontend_adapter=adapter, db_paths=db_paths)
 result = launcher.submit_input(text)

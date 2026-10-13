@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from .model_launcher import MainPartModelLauncher
+from .runtime_status import execution_outcome, exit_code
 
 
 def _load_json_arg(raw: str, path: str) -> dict | None:
@@ -25,15 +26,7 @@ def _load_json_arg(raw: str, path: str) -> dict | None:
 
 
 def _runtime_completed(result: dict) -> bool:
-    summary = result.get("runtime_summary") if isinstance(result.get("runtime_summary"), dict) else {}
-    outputs = result.get("outputs") if isinstance(result.get("outputs"), list) else []
-    if any(
-        isinstance(output, dict)
-        and str(output.get("operation") or "") == "runtime_delivery_failure"
-        for output in outputs
-    ):
-        return False
-    return str(summary.get("scheduler_status") or "") == "completed"
+    return execution_outcome(result) in {"solved", "blocked"}
 
 
 def main() -> None:
@@ -54,8 +47,8 @@ def main() -> None:
     result = (launcher.submit_event_graph(payload, frontend_state)
               if frontend_state is not None else launcher.submit_input(payload))
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None, default=str))
-    if not args.no_auto_run and not _runtime_completed(result):
-        raise SystemExit(1)
+    if not args.no_auto_run:
+        raise SystemExit(exit_code(execution_outcome(result)))
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ def main():
         "--llm-model",
         default=os.getenv(
             "LLM_MODEL",
-            "small-model",
+            "Qwen/Qwen3-8B",
         ),
     )
 

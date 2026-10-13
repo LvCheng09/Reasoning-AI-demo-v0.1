@@ -17,6 +17,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
+from main_part.runtime_status import execution_outcome as _execution_outcome, exit_code as _exit_code
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,7 +48,8 @@ def _require_frontend_configuration() -> None:
         raise RuntimeError(
             f"this demo requires LLM_MODEL={REQUIRED_FRONTEND_MODEL!r}; got {actual_model!r}"
         )
-    os.environ.setdefault("MAIN_PART_FRONTEND_IMPLEMENTATION", "semantic_v1")
+    from main_part.frontend_semantic import validate_frontend_selection
+    validate_frontend_selection()
 
 
 def _build_launcher(session_id: str):
@@ -185,21 +187,6 @@ def _print_human_report(report: dict[str, Any]) -> None:
         f"输出 {report['frontend_usage']['output_chars']} 字符"
     )
     print(f"耗时: {report['elapsed_seconds']} 秒")
-
-
-def _execution_outcome(result: dict[str, Any]) -> str:
-    if any(item.get("operation") == "runtime_delivery_failure" for item in result.get("outputs", [])):
-        return "runtime_failed"
-    summary = result.get("runtime_summary", {})
-    if summary.get("scheduler_status") != "completed":
-        return "incomplete"
-    status = summary.get("task_result", {}).get("status")
-    return status if status in {"solved", "blocked"} else "unresolved"
-
-
-def _exit_code(outcome: str) -> int:
-    # Correct explicit blocking is a completed run, not a solved question.
-    return 0 if outcome in {"solved", "blocked"} else 1 if outcome == "runtime_failed" else 2
 
 
 def main() -> int:

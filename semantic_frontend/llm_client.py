@@ -72,8 +72,8 @@ class SingleSmallLLM:
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
         self.usage = LLMUsage()
 
-        if not self.model:
-            raise ValueError("model must be a non-empty string")
+        if self.model != "Qwen/Qwen3-8B":
+            raise ValueError("model must be Qwen/Qwen3-8B")
         if self.timeout <= 0:
             raise ValueError("timeout must be > 0")
         if self.max_tokens <= 0:

@@ -81,7 +81,9 @@ python -m tools.validate_release_runtime --output demo-results/release-check.jso
 
 Use a new output filename for every run; old evidence is never overwritten. This is not a frontend LLM evaluation, blind test or generalization proof. GitHub CI runs the entire offline suite; its test count is not a count of real reasoning tasks.
 
-Live API demonstrations require your own key and depend on network access, provider availability, and model downloads. A normal demonstration uses the same `Qwen/Qwen3-8B` model twice: once to build the Event Graph and once only to verbalize the validated result. If the second call fails or changes a verified number or unit, the deterministic Decoder draft is shown instead. A single-case runtime is not a fixed performance benchmark.
+Live API demonstrations require your own key and depend on network access, provider availability, and model downloads. Text entry supports only `semantic_v1` with `Qwen/Qwen3-8B`; the old model router has been removed. Graph-only entry needs no API configuration. Numeric results with units may use the same model for wording; if that call fails or changes a verified number or unit, the deterministic Decoder draft is shown instead. Textual, boolean and unitless judgments retain the deterministic conclusion without a wording call. A single-case runtime is not a fixed performance benchmark.
+
+Explicit `db_paths` cannot point at released seeds, including symlinks and hardlinks. Final output requires Output Gate approval, an unambiguous current Event and valid result references. Missing, ambiguous or stale references produce an unresolved answer rather than selecting arbitrary results from the graph.
 
 ## Current boundaries
 

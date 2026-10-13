@@ -72,7 +72,7 @@ def test_actual_runtime_failure_is_reported_after_state_rollback(monkeypatch):
     from main_part.model_launcher import MainPartModelLauncher
     from main_part.scheduler_new import SchedulerNew
     monkeypatch.setenv("MAIN_PART_FRONTEND_VECTORIZE", "0")
-    monkeypatch.setenv("MAIN_PART_FRONTEND_IMPLEMENTATION", "legacy")
+    monkeypatch.setenv("MAIN_PART_FRONTEND_IMPLEMENTATION", "semantic_v1")
     def fault(*args, **kwargs):
         raise RuntimeError("deliberately injected delivery fault")
     memory = WorkingMemoryState()
@@ -150,7 +150,7 @@ def test_output_api_failure_exposes_fallback_and_unknown_cost(monkeypatch):
         raise requests.Timeout("authored transport timeout")
     monkeypatch.setattr("main_part.answer_verbalizer.requests.post", fail)
     renderer = OpenAICompatibleVerbalizer(base_url="https://example.invalid/v1", model="Qwen/Qwen3-8B")
-    assert renderer.verbalize({"rough_text": "verified draft"}) == "verified draft"
+    assert renderer.verbalize({"status": "ok", "rough_text": "verified draft", "target_spans": [{"value": 45, "unit": "days"}]}) == "verified draft"
     assert renderer.last_call_metadata["status"] == "deterministic_fallback"
     assert renderer.last_call_metadata["error_type"] == "Timeout"
     assert renderer.last_call_metadata["provider_usage"] is None

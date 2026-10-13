@@ -77,10 +77,10 @@ def test_explicit_configuration(monkeypatch):
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
         frontend_from_env()
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:8000/v1")
-    monkeypatch.setenv("LLM_MODEL", "configured-model")
+    monkeypatch.setenv("LLM_MODEL", "Qwen/Qwen3-8B")
     adapter = frontend_from_env()
     assert isinstance(adapter, SemanticFrontendAdapter)
-    assert adapter.frontend.llm.model == "configured-model"
+    assert adapter.frontend.llm.model == "Qwen/Qwen3-8B"
 
 
 def test_no_semantic_judge_added():

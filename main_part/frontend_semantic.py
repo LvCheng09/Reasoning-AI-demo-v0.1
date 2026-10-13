@@ -1,13 +1,20 @@
 """Composition only: build the optional frontend without mixing it into reasoning."""
 import os
 
+REQUIRED_FRONTEND_MODEL = "Qwen/Qwen3-8B"
+
+
+def validate_frontend_selection():
+    implementation = os.getenv("MAIN_PART_FRONTEND_IMPLEMENTATION", "semantic_v1").strip()
+    if implementation != "semantic_v1":
+        raise ValueError("only MAIN_PART_FRONTEND_IMPLEMENTATION=semantic_v1 is supported")
+    model = os.getenv("LLM_MODEL", "").strip()
+    if model and model != REQUIRED_FRONTEND_MODEL:
+        raise ValueError(f"only LLM_MODEL={REQUIRED_FRONTEND_MODEL} is supported")
+
 
 def frontend_from_env():
-    implementation = os.getenv("MAIN_PART_FRONTEND_IMPLEMENTATION", "legacy").strip()
-    if implementation == "legacy":
-        return None
-    if implementation != "semantic_v1":
-        raise ValueError("unknown MAIN_PART_FRONTEND_IMPLEMENTATION")
+    validate_frontend_selection()
     from semantic_frontend import SemanticFrontendAdapter, SimpleSemanticFrontend, SingleSmallLLM
     base_url = os.getenv("LLM_BASE_URL", "").strip()
     model = os.getenv("LLM_MODEL", "").strip()

@@ -271,11 +271,11 @@ def test_numeric_guard_rejects_changed_value():
 def test_chat_url_accepts_base_or_full_endpoint():
     a = OpenAICompatibleVerbalizer(
         base_url="http://localhost:8000/v1",
-        model="x",
+        model="Qwen/Qwen3-8B",
     )
     b = OpenAICompatibleVerbalizer(
         base_url="http://localhost:8000/v1/chat/completions",
-        model="x",
+        model="Qwen/Qwen3-8B",
     )
     assert a.chat_url == "http://localhost:8000/v1/chat/completions"
     assert b.chat_url == "http://localhost:8000/v1/chat/completions"
@@ -860,12 +860,13 @@ def test_verbalizer_falls_back_on_http_error(monkeypatch):
     )
     verbalizer = OpenAICompatibleVerbalizer(
         base_url="http://localhost:1/v1",
-        model="x",
+        model="Qwen/Qwen3-8B",
         fallback_on_error=True,
     )
     structured = {
         "rough_text": "deterministic fallback",
-        "target_spans": [],
+        "status": "ok",
+        "target_spans": [{"value": 45, "unit": "days"}],
         "conclusions": [],
     }
     assert (
@@ -879,7 +880,7 @@ def test_verbalizer_rejects_empty_constructor_fields():
     from main_part.answer_verbalizer import OpenAICompatibleVerbalizer
 
     with pytest.raises(ValueError):
-        OpenAICompatibleVerbalizer(base_url="", model="x")
+        OpenAICompatibleVerbalizer(base_url="", model="Qwen/Qwen3-8B")
     with pytest.raises(ValueError):
         OpenAICompatibleVerbalizer(
             base_url="http://localhost/v1",

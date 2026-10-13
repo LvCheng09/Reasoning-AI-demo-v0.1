@@ -57,7 +57,7 @@ def test_output_projection_uses_only_control_approved_result_spans():
         memory,
         outputs=[
             {
-                "operation": "output",
+                "operation": "output", "output_gate_checked": True,
                 "conclusion_span_ids": ["dso_result"],
                 "result_spans": [{"span_id": "dso_result"}],
             }
@@ -82,7 +82,7 @@ def test_runtime_answer_is_deterministic_when_no_verbalizer_is_desired():
 
     answer = service.answer_runtime(
         memory,
-        outputs=[{"operation": "output", "conclusion_span_ids": ["dso_result"]}],
+        outputs=[{"operation": "output", "output_gate_checked": True, "conclusion_span_ids": ["dso_result"]}],
         task_result={"status": "solved"},
     )
 
@@ -111,7 +111,7 @@ def test_output_feature_type_selects_an_existing_non_numeric_result_span():
         memory,
         outputs=[
             {
-                "operation": "output",
+                "operation": "output", "output_gate_checked": True,
                 "result_feature_type": "inventory_capital_tied_up",
             }
         ],
@@ -143,7 +143,7 @@ def test_control_and_goal_bookkeeping_are_not_user_facing_support():
 
     answer = service.answer_runtime(
         memory,
-        outputs=[{"operation": "output", "conclusion_span_ids": ["dso_result"]}],
+        outputs=[{"operation": "output", "output_gate_checked": True, "conclusion_span_ids": ["dso_result"]}],
         task_result={"status": "solved"},
     )
 

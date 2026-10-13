@@ -356,8 +356,8 @@ class OpenAICompatibleVerbalizer:
     ):
         if not str(base_url).strip():
             raise ValueError("base_url must be nonempty")
-        if not str(model).strip():
-            raise ValueError("model must be nonempty")
+        if str(model).strip() != "Qwen/Qwen3-8B":
+            raise ValueError("model must be Qwen/Qwen3-8B")
         self.base_url = str(base_url).strip().rstrip("/")
         self.model = str(model).strip()
         self.api_key = api_key
@@ -383,6 +383,20 @@ class OpenAICompatibleVerbalizer:
         language: str = "zh-CN",
         style_instruction: str = "",
     ) -> str:
+        targets = structured_answer.get("target_spans") or []
+        # Textual/categorical/boolean judgments are already final conclusions.
+        # A number-preservation guard cannot prove their meaning is preserved.
+        if (structured_answer.get("status") != "ok" or not targets or any(
+            not isinstance(target.get("value"), (int, float))
+            or isinstance(target.get("value"), bool)
+            or not str(target.get("unit") or "").strip()
+            for target in targets
+        )):
+            self.last_call_metadata = {
+                "status": "deterministic_conclusion", "attempted_requests": 0,
+                "provider_usage": None, "api_wall_seconds": 0.0,
+            }
+            return str(structured_answer.get("rough_text") or "").strip()
         payload_text = json.dumps(
             dict(structured_answer),
             ensure_ascii=False,
