@@ -17,9 +17,9 @@ The frontend performs semantic normalization and Event Graph construction only; 
 
 The tech reports connect design rationale to data structures, module calls, actual code, and release boundaries. They cover semantic nomination versus admission, Knowledge/Memory roles, Control feedback, Rule composition, Calculator, and output acceptance:
 
-- [Tech Report (English)](docs/TECH_REPORT.ENGLISH.md)
-- [技术报告（中文）](docs/TECH_REPORT.CHINESE.md)
-- [Architecture boundaries](docs/ARCHITECTURE.md)
+- [Tech Report (English)](tech%20report/TECH_REPORT.ENGLISH.md)
+- [技术报告（中文）](tech%20report/TECH_REPORT.CHINESE.md)
+- [Architecture boundaries](tech%20report/ARCHITECTURE.md)
 
 Terminology follows the ERS v10 theory, but implementation statements refer to this repository. Research dynamic intermediate strategies, full subgoal invocation/return, and general dependency-invalidation maintenance are not released here; existing selector delegation and source records do not establish those complete capabilities. This documentation update does not upload the paper, figures, experimental results, or cost comparisons.
 
