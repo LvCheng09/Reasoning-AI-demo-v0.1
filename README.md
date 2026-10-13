@@ -13,12 +13,12 @@
 
 前端只做语义规范化和 Event Graph 构建，不在前端做业务推理。此发布包只包含推理系统，不包含 Auto-Learn、训练或规则重构代码；每次演示都不会修改随仓库发布的 Rule / Knowledge 数据库。
 
-## 技术原理
+## 技术报告
 
 完整说明按“设计原因 → 数据结构 → 模块调用 → 代码实现 → 发布边界”组织，涵盖语义候选与执行许可、Knowledge/Memory 分工、Control 反馈、Rule 组合、Calculator 和输出接受：
 
-- [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
-- [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
+- [技术报告（中文）](docs/TECH_REPORT.CHINESE.md)
+- [Tech Report (English)](docs/TECH_REPORT.ENGLISH.md)
 - [模块边界](docs/ARCHITECTURE.md)
 
 文档术语与 ERS v10 理论部分对齐，但以本仓库的实际实现为准。论文里的动态中策略、完整子目标调用／返回和通用依赖失效维护没有随此 Demo 发布；现有 selector 委托和来源记录不能当作这些能力已完成的证据。论文、图稿、实验结果和成本对照不在此次文档更新中上传。

@@ -1,6 +1,6 @@
-# 技术说明 显式事件状态上的规则组合推理
+# 技术报告 显式事件状态上的规则组合推理
 
-[English version](TECHNICAL_EXPLANATION.ENGLISH.md) · [模块架构](ARCHITECTURE.md) · [安装与运行](../README.md)
+[English Tech Report](TECH_REPORT.ENGLISH.md) · [模块架构](ARCHITECTURE.md) · [安装与运行](../README.md)
 
 本文说明 Reasoning-AI-demo-v0.1 的设计思想、数据结构、模块组成和实际运行过程。理论术语与 ERS v10 的第 3–4 章对齐，但实现说明以本仓库代码为准，不把论文中的隔离研究功能当作发布版能力。本文不是论文、实验结果报告或性能比较。
 

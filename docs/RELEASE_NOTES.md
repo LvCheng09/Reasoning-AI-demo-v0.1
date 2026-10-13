@@ -2,7 +2,7 @@
 
 ## 2026-10-14 documentation alignment
 
-The Chinese and English technical guides now connect ERS theory to actual
+The Chinese and English tech reports now connect ERS theory to actual
 data structures, module interfaces, Control feedback, Rule composition,
 Knowledge completion, execution, and output acceptance. The architecture
 map distinguishes released mechanisms from research-only dynamic hierarchy

@@ -1,6 +1,6 @@
 # Architecture and Runtime Interfaces
 
-[中文技术说明](TECHNICAL_EXPLANATION.CHINESE.md) · [English technical guide](TECHNICAL_EXPLANATION.ENGLISH.md)
+[中文技术报告](TECH_REPORT.CHINESE.md) · [English Tech Report](TECH_REPORT.ENGLISH.md)
 
 This is the code map for the released inference demo. The ERS theory separates semantic candidate discovery, explicit state, local execution, and task-dependent control. Those roles inform this implementation, but research-only dynamic hierarchy and dependency revision are not automatically part of this repository.
 
@@ -108,4 +108,4 @@ Only unit-bearing numeric answers may use the fixed `Qwen/Qwen3-8B` wording clie
 
 Chronological history, selector ancestry, and derivation dependencies are different structures. None alone proves the complete dynamic hierarchy or truth-maintenance mechanism described in the paper.
 
-For the rationale and a DSO walkthrough, see the bilingual technical guides. For runnable commands and test scope, see the repository README. No paper figures, experiment reports, or cost comparisons are distributed by this documentation update.
+For the rationale and a DSO walkthrough, see the bilingual tech reports. For runnable commands and test scope, see the repository README. No paper figures, experiment reports, or cost comparisons are distributed by this documentation update.

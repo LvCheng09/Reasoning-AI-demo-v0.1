@@ -13,12 +13,12 @@ The demo currently covers two connected domains:
 
 The frontend performs semantic normalization and Event Graph construction only; it does not perform business reasoning. This release contains the inference system only. It excludes Auto-Learn, training, and Rule reconstruction, and a demo run never changes the released Rule or Knowledge databases.
 
-## Technical overview
+## Tech Report
 
-The guides connect design rationale to data structures, module calls, actual code, and release boundaries. They cover semantic nomination versus admission, Knowledge/Memory roles, Control feedback, Rule composition, Calculator, and output acceptance:
+The tech reports connect design rationale to data structures, module calls, actual code, and release boundaries. They cover semantic nomination versus admission, Knowledge/Memory roles, Control feedback, Rule composition, Calculator, and output acceptance:
 
-- [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
-- [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
+- [Tech Report (English)](docs/TECH_REPORT.ENGLISH.md)
+- [技术报告（中文）](docs/TECH_REPORT.CHINESE.md)
 - [Architecture boundaries](docs/ARCHITECTURE.md)
 
 Terminology follows the ERS v10 theory, but implementation statements refer to this repository. Research dynamic intermediate strategies, full subgoal invocation/return, and general dependency-invalidation maintenance are not released here; existing selector delegation and source records do not establish those complete capabilities. This documentation update does not upload the paper, figures, experimental results, or cost comparisons.

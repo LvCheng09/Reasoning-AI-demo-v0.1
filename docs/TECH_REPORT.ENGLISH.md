@@ -1,8 +1,8 @@
-# Technical Guide to Rule Composition over Explicit Event States
+# Tech Report: Rule Composition over Explicit Event States
 
-[中文版](TECHNICAL_EXPLANATION.CHINESE.md) · [Architecture](ARCHITECTURE.md) · [Installation and commands](../README_EN.md)
+[中文版技术报告](TECH_REPORT.CHINESE.md) · [Architecture](ARCHITECTURE.md) · [Installation and commands](../README_EN.md)
 
-This guide explains the design, data structures, components, and actual execution of Reasoning-AI-demo-v0.1. Its terminology follows Chapters 3–4 of the ERS v10 theory manuscript, but implementation statements refer to this repository. Research-only mechanisms are not presented as released capabilities. This is neither the paper nor an experimental-results or performance-comparison report.
+This tech report explains the design, data structures, components, and actual execution of Reasoning-AI-demo-v0.1. Its terminology follows Chapters 3–4 of the ERS v10 theory manuscript, but implementation statements refer to this repository. Research-only mechanisms are not presented as released capabilities. This is neither the paper nor an experimental-results or performance-comparison report.
 
 ## 1 Design principle and implementation scope
 
