@@ -2,7 +2,7 @@
 
 [English README](README_EN.md)
 
-这是一个可以直接运行的事件图推理演示版本：前端 LLM 只把自然语言翻译为规范 Event Graph；后端用 Knowledge 证明可补全条件、用 Rule 网络逐步推理；最后只把 Control 放行的结果改写为用户可读回答。
+这是 ERS 显式事件状态与规则组合思想的可运行推理 Demo：前端 LLM 将自然语言翻译为 Event Graph，语义相似提出候选，明确条件决定能否执行。后端用 Knowledge 证明可补全性质，由 Control 组织可复用 Rule 的绑定与连接，执行结果和失败反馈再影响下一步；最终只展示经过输出门批准的结果。
 
 本项目采用 [Apache License 2.0](LICENSE)。
 
@@ -15,11 +15,13 @@
 
 ## 技术原理
 
-完整的设计动机、feature 表示、Knowledge/Rule 分工、严格匹配、Control、Calculator、Memory、Output Gate 和当前边界，请看：
+完整说明按“设计原因 → 数据结构 → 模块调用 → 代码实现 → 发布边界”组织，涵盖语义候选与执行许可、Knowledge/Memory 分工、Control 反馈、Rule 组合、Calculator 和输出接受：
 
 - [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
 - [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
 - [模块边界](docs/ARCHITECTURE.md)
+
+文档术语与 ERS v10 理论部分对齐，但以本仓库的实际实现为准。论文里的动态中策略、完整子目标调用／返回和通用依赖失效维护没有随此 Demo 发布；现有 selector 委托和来源记录不能当作这些能力已完成的证据。论文、图稿、实验结果和成本对照不在此次文档更新中上传。
 
 ## 快速开始
 

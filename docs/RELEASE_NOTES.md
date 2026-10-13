@@ -1,5 +1,14 @@
 # v0.1 Release Notes
 
+## 2026-10-14 documentation alignment
+
+The Chinese and English technical guides now connect ERS theory to actual
+data structures, module interfaces, Control feedback, Rule composition,
+Knowledge completion, execution, and output acceptance. The architecture
+map distinguishes released mechanisms from research-only dynamic hierarchy
+and dependency revision. Runtime code, seed databases, and release scope are
+unchanged; no paper, figures, or experiment reports are added.
+
 ## 2026-10-13 maintenance update
 
 Default entry and per-launcher seed isolation fixed; runtime failure exit status,

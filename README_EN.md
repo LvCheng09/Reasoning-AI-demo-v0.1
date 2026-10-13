@@ -2,7 +2,7 @@
 
 [中文 README](README.md)
 
-This is a runnable Event Graph reasoning demonstration. The frontend LLM only translates natural-language input into a normalized Event Graph. The backend uses Knowledge to prove conditions that can be completed, applies the Rule network step by step, and renders only Control-approved results as a user-facing answer.
+This runnable inference demo implements the ERS idea of explicit Event states and reusable Rule composition. The frontend LLM translates text into an Event Graph; semantic similarity nominates candidates, while declared conditions determine admission. Knowledge proves supported completions, Control organizes Rule bindings and continuations, and execution results or failures inform the next decision. Only output-gated results reach presentation.
 
 The project is released under the [Apache License 2.0](LICENSE).
 
@@ -15,11 +15,13 @@ The frontend performs semantic normalization and Event Graph construction only; 
 
 ## Technical overview
 
-For the design rationale, feature representation, Knowledge/Rule separation, strict matching, Control, Calculator, Memory, the Output Gate, and the current boundaries, see:
+The guides connect design rationale to data structures, module calls, actual code, and release boundaries. They cover semantic nomination versus admission, Knowledge/Memory roles, Control feedback, Rule composition, Calculator, and output acceptance:
 
 - [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
 - [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
 - [Architecture boundaries](docs/ARCHITECTURE.md)
+
+Terminology follows the ERS v10 theory, but implementation statements refer to this repository. Research dynamic intermediate strategies, full subgoal invocation/return, and general dependency-invalidation maintenance are not released here; existing selector delegation and source records do not establish those complete capabilities. This documentation update does not upload the paper, figures, experimental results, or cost comparisons.
 
 ## Quick start
 
