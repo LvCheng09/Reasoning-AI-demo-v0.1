@@ -253,3 +253,57 @@ Python paths without a directory prefix in this table are under `main_part/`.
 Released seeds are `data/demo/db/rule.sqlite` and `knowledge.sqlite`. [runtime_databases.py](../main_part/runtime_databases.py) creates `runtime/inference_*` copies using SQLite backup. Retrieval counts, indexes, and runtime Memory affect copies only. Explicit paths cannot bypass seed protection through symbolic or hard links. This inference-entry protection is not a universal permission restriction on every persistence utility or explicit publication tool.
 
 This repository is an inference demo for two connected domains. It does not distribute the paper, experimental data, Auto-Learn, training tasks, a PRS compiler, visual input, or complete dynamic dependency maintenance. Operator contracts, hierarchical planning, production rules, and truth maintenance have established precedents. The design focus is their integration with semantic nomination, current Event state, and execution feedback, not a claim that each individual mechanism is unprecedented.
+
+## 16 Comparison with world models
+
+The following eight architectural comparisons follow Appendix B of the ERS v10 paper. Here, world models primarily mean systems that learn environmental representations and dynamics to predict futures and support planning; not every world model has the same architecture. This is not a measured comparison of performance, cost, or overall capability. The distinction between ERS theory and the released demo remains as described above.
+
+### 16.1 Reasoning mechanism and logical reliability
+
+World models learn representations of environments and their dynamics, predicting possible successor states in latent space. Statistical plausibility does not establish that an individual operation satisfies explicit logical conditions or that its evidential dependencies hold.
+
+ERS connects current facts to new results through executable Rules and checks premises, object bindings, applicability, and support. In code, Matcher checks conditions and Executor performs operations. Reliability depends on input grounding and declared contracts; an explicit rule system is not inherently error-free.
+
+### 16.2 Hierarchical organization and dynamic problem solving
+
+Some hierarchical world models use predefined levels or learn hierarchical representations. Latent states alone need not directly identify a failed premise, conflicting rule, or changed logical dependency.
+
+ERS theory organizes control levels around the current task's dependency structure. Missing premises, new information, and execution failures can revise relevant subgoals and continuations rather than merely degrading the original path's output. Released selector delegation, strategy synchronization, and failure feedback are related foundations; full dynamic intermediate strategies and subgoal invocation/return are not included in this demo.
+
+### 16.3 Capability expansion and long-term maintenance
+
+World models relying on parameterized representations may require further training or fine-tuning to incorporate domain knowledge, and parameter changes may affect existing behavior. Implementations can also use external memory, tools, or modules, so this is not a claim that every world model must be retrained as a whole.
+
+ERS separately manages Knowledge definitions, execution Rules, and Control strategies. Domain capabilities can be extended by adding, modifying, or replacing those components without encoding every business change in semantic-model parameters. Removing unnecessary components also changes candidate scope and search cost. Persistence and retrieval implement this separation, but new components still require validation; the demo does not provide automatic learning or an automatic unloading policy.
+
+### 16.4 Integration of semantic understanding and logical execution
+
+Neural models extract continuous semantic features from varied expressions; explicit execution systems provide inspectable operational conditions. These components serve different roles in input flexibility and condition verification.
+
+ERS connects them through a common Event representation. The frontend identifies objects, attributes, and relations; the backend selects, matches, executes, and checks Rules against current state. Similarity nominates candidates, while bindings, applicability, and evidence determine admission. The current boundaries are `semantic_frontend/`, the graph interface, `matcher/`, and `executor_new.py`, allowing semantic models and domain Rules to be maintained separately.
+
+### 16.5 Error location and corrective response
+
+When a latent-state prediction fails, the representation alone need not reveal whether the input facts are wrong, knowledge is missing, a condition is unsatisfied, or planning failed to find a feasible route.
+
+ERS records actual bindings, matching failures, execution outcomes, and sources. Different observations guide Knowledge completion, Rule extension, renewed matching, or Control revision. Scheduler recovery feedback exposes failure locations, not necessarily their complete causal explanation. A semantic-encoding error may require source inspection, and an empty retrieved candidate set does not prove the library lacks an applicable Rule.
+
+### 16.6 Dynamic state maintenance
+
+Facts and task constraints change. Without explicit dependencies, state prediction alone does not directly identify which conclusions are affected or which retain independent support.
+
+ERS theory retains object identity, validity periods, provenance, and derivation dependencies. Corrections, withdrawals, or invalidations prompt reassessment of affected support; a conclusion can survive through a valid independent justification. Withdrawal is not refutation, and losing one support is not losing every support. The demo contains computation sources, alignment fingerprints, and output-snapshot checks only; these do not establish released general invalidation propagation, independent-support maintenance, or rebinding.
+
+### 16.7 Evaluation of reasoning and acceptance of output
+
+Answer matching, reference-path conformity, and external scoring evaluate aspects of a result. A correct answer does not establish a valid process, and a valid alternative solution should not be rejected solely for differing from a reference path.
+
+ERS separates goal satisfaction, operation applicability, and evidential support. Alternative paths can be accepted under the same goal and constraints, while unsupported conclusions cannot be released. Output Gate, `output_service.py`, and Decoder implement the current acceptance and presentation boundary; they are not complete verifiers of real-world factual truth.
+
+### 16.8 Uncertainty and information gaps
+
+Incomplete information, conflicting evidence, and unsatisfied prerequisites are not merely confidence annotations attached after generation. They also change which operations are admissible and which information should be sought next.
+
+ERS theory distinguishes confirmed facts, hypotheses, unresolved relations, and supported conclusions, making evidence status relevant to Rule admission and Control decisions. Insufficient support can block an operation, trigger Knowledge completion, reorganize a path, or preserve an undetermined result; valid new information can reopen a blocked path. The demo supplies completion, targeted frontend refinement, and task-status interfaces, not verification of every conflict-resolution or dynamic-recovery scenario.
+
+World models and ERS can also be complementary. A world model can predict possible environmental changes; ERS can treat those predictions as candidate information with source and applicability conditions and check whether they support current reasoning. The architectural distinction is between predicting what may happen and recording the premises that license an accepted derivation, not treating the two systems as interchangeable solutions to the same task.
