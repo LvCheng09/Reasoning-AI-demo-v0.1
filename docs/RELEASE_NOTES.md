@@ -4,7 +4,7 @@
 
 Default entry and per-launcher seed isolation fixed; runtime failure exit status,
 transport limits, truncated-response rejection, stage/API usage records and full
-offline CI added. See [validation and cost boundaries](VALIDATION_AND_COST.md).
+offline CI added.
 The experimental dynamic hierarchy is intentionally not merged into this release.
 
 ## Included

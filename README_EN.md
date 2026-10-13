@@ -20,7 +20,6 @@ For the design rationale, feature representation, Knowledge/Rule separation, str
 - [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
 - [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
 - [Architecture boundaries](docs/ARCHITECTURE.md)
-- [Release validation boundaries and experimental costs](docs/VALIDATION_AND_COST.md)
 
 ## Quick start
 

@@ -20,7 +20,6 @@
 - [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
 - [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
 - [模块边界](docs/ARCHITECTURE.md)
-- [发布版更新、验证范围与实验成本](docs/VALIDATION_AND_COST.md)
 
 ## 快速开始
 
