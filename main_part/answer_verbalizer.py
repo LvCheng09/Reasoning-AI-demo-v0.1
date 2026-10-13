@@ -7,6 +7,7 @@ The LLM is restricted to wording. It must not become a second reasoning engine.
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -366,6 +367,7 @@ class OpenAICompatibleVerbalizer:
         self.guard = guard or NumericPreservationGuard()
         self.fallback_to_rough_text = bool(fallback_to_rough_text)
         self.fallback_on_error = bool(fallback_on_error)
+        self.last_call_metadata: dict[str, Any] = {"status": "not_called", "provider_usage": None}
 
     @property
     def chat_url(self) -> str:
@@ -409,6 +411,8 @@ Rewrite only the verified structured result into a fluent answer.
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        started = time.perf_counter()
+        self.last_call_metadata = {"status": "requested", "attempted_requests": 1, "provider_usage": None}
         try:
             response = requests.post(
                 self.chat_url,
@@ -422,16 +426,27 @@ Rewrite only the verified structured result into a fluent answer.
                     # must rightly reject.  This mirrors the frontend's
                     # translation configuration: one direct response only.
                     "enable_thinking": False,
+                    "max_tokens": 1024,
                     "stream": False,
                     "messages": [
                         {"role": "system", "content": VERBALIZER_SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt},
                     ],
                 },
-                timeout=self.timeout,
+                timeout=(20, self.timeout),
             )
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+            body = response.json()
+            usage = body.get("usage")
+            if isinstance(usage, Mapping):
+                self.last_call_metadata["provider_usage"] = {
+                    key: value for key, value in usage.items()
+                    if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                    and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                } or None
+            if body["choices"][0].get("finish_reason") == "length":
+                raise ValueError("verbalizer response was truncated")
+            content = body["choices"][0]["message"]["content"]
             if isinstance(content, str):
                 rendered = content.strip()
             elif isinstance(content, list):
@@ -454,19 +469,26 @@ Rewrite only the verified structured result into a fluent answer.
             IndexError,
             TypeError,
             ValueError,
-        ):
+        ) as exc:
+            self.last_call_metadata.update(status="request_failed", error_type=type(exc).__name__)
             if self.fallback_on_error:
+                self.last_call_metadata["status"] = "deterministic_fallback"
                 return str(
                     structured_answer.get("rough_text") or ""
                 ).strip()
             raise
+        finally:
+            self.last_call_metadata["api_wall_seconds"] = time.perf_counter() - started
 
         check = self.guard.check(structured_answer, rendered)
         if check.ok:
+            self.last_call_metadata["status"] = "rendered"
             return rendered
 
         if self.fallback_to_rough_text:
+            self.last_call_metadata.update(status="deterministic_fallback", guard_reason=check.reason)
             return str(structured_answer.get("rough_text") or "").strip()
+        self.last_call_metadata.update(status="guard_rejected", guard_reason=check.reason)
         raise ValueError(f"verbalization guard failed: {check.reason}")
 
 

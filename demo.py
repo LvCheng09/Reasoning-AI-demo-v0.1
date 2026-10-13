@@ -10,6 +10,7 @@ and does not alter the bundled Rule or Knowledge data.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -61,16 +62,11 @@ def _build_launcher(session_id: str):
         local_files_only=_bool_env("MAIN_PART_EMBEDDING_LOCAL_FILES_ONLY"),
         load_encoder=True,
     )
-    db_root = ROOT / "data" / "demo" / "db"
     launcher = MainPartModelLauncher(
         frontend_adapter=frontend_from_env(),
         vector_encoder=encoder,
         auto_run=True,
         session_id=session_id,
-        db_paths={
-            "rule": str(db_root / "rule.sqlite"),
-            "knowledge": str(db_root / "knowledge.sqlite"),
-        },
     )
     return launcher
 
@@ -92,6 +88,7 @@ def _build_answer_service():
             base_url=os.environ["LLM_BASE_URL"],
             model=REQUIRED_FRONTEND_MODEL,
             api_key=os.environ["LLM_API_KEY"],
+            timeout=int(os.getenv("LLM_READ_TIMEOUT_SECONDS", "180")),
             include_user_query=False,
             fallback_to_rough_text=True,
             fallback_on_error=True,
@@ -153,10 +150,14 @@ def _report(
         "answer_payload": answer_result.structured,
         "active_rule_ids": list(state.active_rule_ids),
         "frontend_usage": {
-            "calls": llm.usage.calls,
-            "input_chars": llm.usage.input_chars,
-            "output_chars": llm.usage.output_chars,
+            **asdict(llm.usage),
+            "token_usage_note": "Provider-reported fields only; missing or partial usage is not zero cost.",
         },
+        "pipeline_timing": result.get("pipeline_timing", {}),
+        "runtime_db_paths": dict(launcher.db_paths),
+        "runtime_delivery_failures": [item for item in result.get("outputs", [])
+                                      if item.get("operation") == "runtime_delivery_failure"],
+        "execution_outcome": _execution_outcome(result),
         "elapsed_seconds": round(elapsed_seconds, 3),
     }
 
@@ -165,6 +166,9 @@ def _print_human_report(report: dict[str, Any]) -> None:
     print("\n=== Reasoning-AI-demo-v0.1 ===")
     print(f"问题: {report['question']}")
     print(f"状态: {report['scheduler_status']}")
+    print(f"运行判定: {report['execution_outcome']}")
+    if report["runtime_delivery_failures"]:
+        print("运行失败: " + json.dumps(report["runtime_delivery_failures"], ensure_ascii=False))
     if report.get("blocking_reason"):
         print(f"阻塞原因: {report['blocking_reason']}")
     print(f"推理状态: {json.dumps(report['task_result'], ensure_ascii=False)}")
@@ -183,6 +187,21 @@ def _print_human_report(report: dict[str, Any]) -> None:
     print(f"耗时: {report['elapsed_seconds']} 秒")
 
 
+def _execution_outcome(result: dict[str, Any]) -> str:
+    if any(item.get("operation") == "runtime_delivery_failure" for item in result.get("outputs", [])):
+        return "runtime_failed"
+    summary = result.get("runtime_summary", {})
+    if summary.get("scheduler_status") != "completed":
+        return "incomplete"
+    status = summary.get("task_result", {}).get("status")
+    return status if status in {"solved", "blocked"} else "unresolved"
+
+
+def _exit_code(outcome: str) -> int:
+    # Correct explicit blocking is a completed run, not a solved question.
+    return 0 if outcome in {"solved", "blocked"} else 1 if outcome == "runtime_failed" else 2
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -194,17 +213,29 @@ def main() -> int:
     question = args.question or PRESETS[args.preset]
     started = time.monotonic()
     launcher = _build_launcher(f"demo_{int(time.time())}")
+    initialize_seconds = time.monotonic() - started
     result = launcher.submit_input(question)
-    answer_result = launcher.render_final_answer(
-        _build_answer_service(),
-        user_query=question,
-        language="zh-CN",
-        style_instruction=(
-            "Directly state the result first. Then give only the supplied "
-            "supporting facts and the stated uncertainty, if any."
-        ),
+    output_started = time.monotonic()
+    if _execution_outcome(result) not in {"solved", "blocked"}:
+        from main_part.output_service import AnswerResult
+        message = "推理运行未完成，不能提供已验证答案。请查看 runtime_delivery_failures 和运行状态。"
+        answer_result = AnswerResult(message, message, {"status": "unresolved"})
+        output_usage = {"status": "not_called", "provider_usage": None}
+    else:
+        answer_service = _build_answer_service()
+        answer_result = launcher.render_final_answer(
+            answer_service, user_query=question, language="zh-CN",
+            style_instruction=("Directly state the result first. Then give only the supplied "
+                               "supporting facts and the stated uncertainty, if any."),
+        )
+        output_usage = answer_service.verbalizer.last_call_metadata
+    result["pipeline_timing"].update(
+        initialize_seconds=initialize_seconds,
+        output_presentation_seconds=time.monotonic() - output_started,
+        scope="Stage wall times, backend process CPU, and frontend provider usage; not a FLOPs, energy or billing estimate.",
     )
     report = _report(question, result, launcher, answer_result, time.monotonic() - started)
+    report["output_llm_usage"] = output_usage
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -212,7 +243,7 @@ def main() -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         _print_human_report(report)
-    return 0
+    return _exit_code(report["execution_outcome"])
 
 
 if __name__ == "__main__":

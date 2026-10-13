@@ -50,11 +50,9 @@ def main() -> None:
 
     payload: dict = {"input": args.input}
     frontend_state = _load_json_arg(args.frontend_state_json, args.frontend_state_file)
-    if frontend_state is not None:
-        payload["frontend_state"] = frontend_state
-
     launcher = MainPartModelLauncher(session_id=args.session_id, auto_run=not args.no_auto_run)
-    result = launcher.submit_input(payload)
+    result = (launcher.submit_event_graph(payload, frontend_state)
+              if frontend_state is not None else launcher.submit_input(payload))
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None, default=str))
     if not args.no_auto_run and not _runtime_completed(result):
         raise SystemExit(1)

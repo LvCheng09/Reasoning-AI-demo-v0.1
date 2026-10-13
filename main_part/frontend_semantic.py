@@ -13,5 +13,10 @@ def frontend_from_env():
     model = os.getenv("LLM_MODEL", "").strip()
     if not base_url or not model:
         raise ValueError("semantic_v1 requires LLM_BASE_URL and LLM_MODEL")
-    llm = SingleSmallLLM(base_url, model, os.getenv("LLM_API_KEY", "local"))
+    llm = SingleSmallLLM(
+        base_url, model, os.getenv("LLM_API_KEY", "local"),
+        timeout=int(os.getenv("LLM_READ_TIMEOUT_SECONDS", "180")),
+        max_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "4096")),
+        max_retries=int(os.getenv("LLM_MAX_RETRIES", "1")),
+    )
     return SemanticFrontendAdapter(SimpleSemanticFrontend(llm, embedder=None))

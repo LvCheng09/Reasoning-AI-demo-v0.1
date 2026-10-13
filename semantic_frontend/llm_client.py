@@ -23,6 +23,12 @@ class LLMUsage:
     calls: int = 0
     input_chars: int = 0
     output_chars: int = 0
+    attempted_requests: int = 0
+    api_wall_seconds: float = 0.0
+    token_usage_calls: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class SingleSmallLLM:
@@ -113,15 +119,8 @@ class SingleSmallLLM:
 
         try:
             data = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start < 0 or end <= start:
-                raise ValueError(
-                    "LLM response did not contain a JSON object. "
-                    f"Response prefix: {text[:300]!r}"
-                )
-            data = json.loads(text[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM response is not one complete JSON object; no fragments accepted") from exc
 
         if not isinstance(data, dict):
             raise ValueError(
@@ -149,10 +148,18 @@ class SingleSmallLLM:
         return headers
 
     def _post(self, payload: dict[str, Any]) -> requests.Response:
+        started = time.perf_counter()
+        try:
+            return self._post_with_retries(payload)
+        finally:
+            self.usage.api_wall_seconds += time.perf_counter() - started
+
+    def _post_with_retries(self, payload: dict[str, Any]) -> requests.Response:
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             try:
+                self.usage.attempted_requests += 1
                 response = requests.post(
                     self.endpoint,
                     headers=self._headers(),
@@ -201,11 +208,20 @@ class SingleSmallLLM:
                 f"{json.dumps(body, ensure_ascii=False)[:1000]}"
             ) from exc
 
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("LLM API returned empty choices[0].message.content")
-
         self.usage.calls += 1
         self.usage.input_chars += len(SYSTEM_PROMPT) + len(user_prompt)
-        self.usage.output_chars += len(content)
-
+        self.usage.output_chars += len(content) if isinstance(content, str) else 0
+        provider_usage = body.get("usage")
+        if isinstance(provider_usage, dict):
+            valid = {key: value for key, value in provider_usage.items()
+                     if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+                     and isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+            if valid:
+                self.usage.token_usage_calls += 1
+            for key, value in valid.items():
+                setattr(self.usage, key, (getattr(self.usage, key) or 0) + value)
+        if body["choices"][0].get("finish_reason") == "length":
+            raise ValueError("LLM response was truncated (finish_reason=length); no partial graph accepted")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("LLM API returned empty choices[0].message.content")
         return self._extract_json(content)

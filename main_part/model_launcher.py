@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from .memory_redis import build_memory_redis_cache_from_env
 from .memory_workspace import select_memory_workspace_context
 from .rule_vector_encoder import RuleVectorEncoder
 from .runtime_launcher import RuntimeLauncher
+from .runtime_databases import default_db_paths
 from .scheduler_new import SchedulerNew
 
 
@@ -110,6 +112,7 @@ class MainPartModelLauncher:
         self.runtime = RuntimeLauncher(self.scheduler, working_memory=self.working_memory, max_attempts=runtime_max_attempts)
 
     def submit_input(self, input_payload: Mapping[str, Any] | str) -> dict[str, Any]:
+        frontend_started = time.perf_counter()
         game_input = self._normalize_input(input_payload)
         _reject_supervision_at_frontend_boundary(game_input)
         self._prepare_submission()
@@ -126,12 +129,15 @@ class MainPartModelLauncher:
         else:
             frontend_state = self.build_frontend_state(frontend_input)
             frontend_source = "frontend_llm"
-        return self._submit_event_graph(
+        frontend_seconds = time.perf_counter() - frontend_started
+        result = self._submit_event_graph(
             original_game_input,
             frontend_state,
             input_context=input_context,
             source=frontend_source,
         )
+        result["pipeline_timing"]["input_context_and_frontend_seconds"] = frontend_seconds
+        return result
 
     def submit_event_graph(
         self,
@@ -186,6 +192,7 @@ class MainPartModelLauncher:
         input_context: Mapping[str, Any],
         source: str,
     ) -> dict[str, Any]:
+        boundary_started = time.perf_counter()
         frontend_state = self._normalize_frontend_state(dict(event_graph), game_input)
         contract = validate_event_graph_contract(frontend_state)
         if not contract["ok"]:
@@ -198,7 +205,12 @@ class MainPartModelLauncher:
             session_id=self.session_id,
             source=source,
         )
+        boundary_seconds = time.perf_counter() - boundary_started
+        backend_started = time.perf_counter()
+        backend_cpu_started = time.process_time()
         outputs = self.runtime.run_once() if self.auto_run else []
+        backend_cpu_seconds = time.process_time() - backend_cpu_started
+        backend_seconds = time.perf_counter() - backend_started
         return {
             "frontend_state": frontend_state,
             "event_graph_contract": contract,
@@ -206,6 +218,12 @@ class MainPartModelLauncher:
             "input_context": input_context,
             "outputs": outputs,
             "runtime_summary": self.runtime_summary(),
+            "pipeline_timing": {
+                "graph_boundary_seconds": boundary_seconds,
+                "backend_wall_seconds": backend_seconds,
+                "backend_process_cpu_seconds": backend_cpu_seconds,
+                "backend_executed": self.auto_run,
+            },
         }
 
     def run_once(self) -> list[dict[str, Any]]:
@@ -1405,21 +1423,7 @@ def _balanced_json_candidates(text: str) -> list[str]:
 
 
 def _default_db_paths() -> dict[str, str]:
-    project_root = Path(__file__).resolve().parents[1]
-    # The current product entry is the prepared DSO demo. Keep the normal CLI
-    # and the validated finance runtime on the same databases so a successful
-    # integration run cannot differ from real CLI behavior.
-    configured_dir = os.getenv("MAIN_PART_DB_DIR", "").strip()
-    data_dir = (
-        Path(configured_dir).expanduser()
-        if configured_dir
-        else project_root / "data" / "finance_dso_medium_v1" / "db"
-    )
-    return {
-        "knowledge": str(data_dir / "knowledge.sqlite"),
-        "rule": str(data_dir / "rule.sqlite"),
-        "memory": str(data_dir / "memory.sqlite"),
-    }
+    return default_db_paths()
 
 
 def _maybe_build_vector_encoder() -> dict[str, Any]:

@@ -13,19 +13,24 @@ def _disable_network_vector_loading(monkeypatch):
     monkeypatch.setenv("MAIN_PART_FRONTEND_VECTORIZE", "0")
 
 
-def test_default_db_paths_use_dso_product_database(monkeypatch):
+def test_default_db_paths_use_isolated_released_databases(monkeypatch, tmp_path):
     monkeypatch.delenv("MAIN_PART_DB_DIR", raising=False)
+    monkeypatch.setenv("MAIN_PART_RUNTIME_DIR", str(tmp_path))
     paths = _default_db_paths()
-    assert all("data/finance_dso_medium_v1/db" in value for value in paths.values())
+    assert all(Path(value).parent.parent == tmp_path for value in paths.values())
+    assert Path(paths["rule"]).is_file() and Path(paths["knowledge"]).is_file()
+    assert not Path(paths["memory"]).exists()  # Created only when the runtime needs it.
 
 
 def test_default_db_paths_allow_isolated_runtime_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("MAIN_PART_DB_DIR", str(tmp_path))
+    from main_part.runtime_databases import prepare_runtime_databases
+    managed = Path(prepare_runtime_databases(runtime_root=tmp_path)["rule"]).parent
+    monkeypatch.setenv("MAIN_PART_DB_DIR", str(managed))
     paths = _default_db_paths()
     assert paths == {
-        "knowledge": str(Path(tmp_path) / "knowledge.sqlite"),
-        "rule": str(Path(tmp_path) / "rule.sqlite"),
-        "memory": str(Path(tmp_path) / "memory.sqlite"),
+        "knowledge": str(managed / "knowledge.sqlite"),
+        "rule": str(managed / "rule.sqlite"),
+        "memory": str(managed / "memory.sqlite"),
     }
 
 

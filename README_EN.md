@@ -20,6 +20,7 @@ For the design rationale, feature representation, Knowledge/Rule separation, str
 - [Technical overview (English)](docs/TECHNICAL_EXPLANATION.ENGLISH.md)
 - [技术原理说明（中文）](docs/TECHNICAL_EXPLANATION.CHINESE.md)
 - [Architecture boundaries](docs/ARCHITECTURE.md)
+- [Release validation boundaries and experimental costs](docs/VALIDATION_AND_COST.md)
 
 ## Quick start
 
@@ -61,19 +62,32 @@ python demo.py --preset dso --output demo-results/dso.json
 
 `data/demo/db/knowledge.sqlite` contains the core–relation–nature Knowledge network. `data/demo/db/rule.sqlite` contains the Rule network. Memory is a runtime experience layer: it is not shipped as historical data and demo runs do not write learning results.
 
+These are immutable release seeds. Both the demo and the default Python launcher first create independent writable copies under `runtime/inference_*`. Retrieval counters, indexes and runtime Memory are written only to those copies. The JSON report lists their paths. `MAIN_PART_DB_DIR`, when set, must identify existing user-managed runtime databases, never the released seeds.
+
+Reports separate initialization, frontend/input-context, graph boundary, backend wall/process-CPU time, and output presentation. Provider-reported token usage is recorded; missing usage remains unknown, not free. Output fallback metadata is exposed. Exit codes: `0` for explicitly solved or explicitly blocked; `1` for runtime failure; `2` for incomplete/unconfirmed results. A blocked result is not a solved question.
+
 ## Verification
 
 The following tests make no real API calls and do not download models:
 
 ```bash
-python -m pytest tests/test_contracts.py tests/test_semantic_alignment.py tests/test_semantic_frontend.py tests/test_output_presentation.py tests/output_decoder/test_output_decoder.py
+MAIN_PART_FRONTEND_VECTORIZE=0 python -m pytest
 ```
+
+A separate real-backend regression uses authored Event Graphs, the actual Launcher/Scheduler, real cached embedding vectors, Matcher, Executor and output gates. It requires the embedding model to be cached locally; it makes no external LLM calls and does not download a model:
+
+```bash
+python -m tools.validate_release_runtime --output demo-results/release-check.json
+```
+
+Use a new output filename for every run; old evidence is never overwritten. This is not a frontend LLM evaluation, blind test or generalization proof. GitHub CI runs the entire offline suite; its test count is not a count of real reasoning tasks.
 
 Live API demonstrations require your own key and depend on network access, provider availability, and model downloads. A normal demonstration uses the same `Qwen/Qwen3-8B` model twice: once to build the Event Graph and once only to verbalize the validated result. If the second call fails or changes a verified number or unit, the deterministic Decoder draft is shown instead. A single-case runtime is not a fixed performance benchmark.
 
 ## Current boundaries
 
 - This is a two-domain research demo, not a general-purpose question-answering product.
+- Recent dynamic middle-strategy, live evidence invalidation/rebinding and cost-comparison mechanisms remain isolated experiments. They are not wired into this release's default entry and their gains are not performance promises for this repository.
 - Rule and Knowledge quality and coverage define the capability ceiling. If a condition is not proven, the system must reject completion or change path rather than weaken a match.
 - Validated presentation paths include DSO, inventory capital tied up, stockout exposure, cross-domain inventory-to-cash-flow effects, and a missing-condition rejection case. A live LLM service can still fail transiently; a retry may recover.
 - This repository contains no API keys, model weights, old run records, training logs, or original project Git history.
