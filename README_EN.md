@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="https://arxiv.org/abs/2610.22403"><img src="https://img.shields.io/badge/arXiv-2610.22403-b31b1b?style=flat-square" alt="Paper: arXiv 2610.22403"></a>
+  <a href="https://lvcheng09.github.io/ERS-website/"><img src="https://img.shields.io/badge/Website-ERS-2563EB?style=flat-square" alt="ERS project website"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-111827?style=flat-square" alt="License: Apache 2.0"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11+"></a>
   <a href="#scope-and-limitations"><img src="https://img.shields.io/badge/Release-v0.1-111827?style=flat-square" alt="Demo v0.1"></a>
@@ -21,6 +22,7 @@
   <a href="#quick-start">Quick Start</a> ·
   <a href="#demo-tasks">Demo Tasks</a> ·
   <a href="tech%20report/TECH_REPORT.ENGLISH.md">Tech Report</a> ·
+  <a href="https://lvcheng09.github.io/ERS-website/">Website</a> ·
   <a href="#scope-and-limitations">Scope</a> ·
   <a href="README.md">中文</a>
 </p>
