@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://arxiv.org/abs/2610.22403"><img src="https://img.shields.io/badge/arXiv-2610.22403-b31b1b?style=flat-square" alt="论文：arXiv 2610.22403"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-111827?style=flat-square" alt="License: Apache 2.0"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.11+"></a>
   <a href="#当前范围与限制"><img src="https://img.shields.io/badge/Release-v0.1-111827?style=flat-square" alt="Demo v0.1"></a>
