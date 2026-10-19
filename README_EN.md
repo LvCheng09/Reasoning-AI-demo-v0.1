@@ -32,7 +32,7 @@ Reasoning-AI is a runnable inference demo of the ERS approach. A frontend LLM tr
 
 The central distinction: **semantic similarity nominates candidates; declared conditions and current evidence determine whether they may execute.**
 
-This is a research demo for finance and inventory / supply chain, not a general-purpose question-answering product. The release includes inference only, not Auto-Learn, training, or Rule reconstruction.
+This is a research demo for finance and inventory / supply chain, not a general-purpose question-answering product.
 
 ## Why an explicit Rule Network?
 
