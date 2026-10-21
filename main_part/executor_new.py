@@ -22,6 +22,9 @@ from .calculator import Calculator
 from .rule_selector import child_rule_selectors, normalize_rule_selectors
 from .rule_path_candidates import choose_candidate_rule_path
 from .control_state import control_state_update, validate_task_result
+from .activation_semantics import ActivationError, apply_output_semantics
+from .rule_execution_contract import check_effect, check_output, execution_workspace, is_typed_rule, result_metadata, span_output_items
+from .rule_execution_runtime import RuleExecutionRuntime
 
 
 GRAPH_OPERATIONS = {"add", "update", "delete", "merge", "split"}
@@ -43,6 +46,7 @@ class ExecutorStep:
     result: dict[str, Any] = field(default_factory=dict)
     error: str = ""
     created_at: str = ""
+    execution_decision: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +62,7 @@ class ExecutorStep:
             "result": self.result,
             "error": self.error,
             "created_at": self.created_at,
+            "execution_decision": self.execution_decision,
         }
 
 
@@ -77,6 +82,7 @@ class ExecutorResult:
     errors: list[dict[str, Any]] = field(default_factory=list)
     claim_transaction: dict[str, Any] = field(default_factory=dict)
     control_updates: list[dict[str, Any]] = field(default_factory=list)
+    activation_decisions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,6 +100,7 @@ class ExecutorResult:
             "errors": self.errors,
             "claim_transaction": self.claim_transaction,
             "control_updates": self.control_updates,
+            "activation_decisions": self.activation_decisions,
         }
 
 
@@ -114,6 +121,8 @@ def execute_rule_chain(
     max_steps: int = DEFAULT_RULE_CHAIN_MAX_STEPS,
     resume: bool = True,
     calculator: Calculator | None = None,
+    control_operation_handler=None,
+    rule_runtime: RuleExecutionRuntime | None = None,
 ) -> dict[str, Any]:
     """Execute matched rule.produced items as a bounded logic chain.
 
@@ -127,6 +136,8 @@ def execute_rule_chain(
         session_id=session_id,
         control_context=control_context,
         calculator=calculator,
+        control_operation_handler=control_operation_handler,
+        rule_runtime=rule_runtime,
     )
     return executor.execute(
         matched_rules=matched_rules,
@@ -145,11 +156,15 @@ class RuleChainExecutor:
         session_id: str,
         control_context: dict[str, Any] | None = None,
         calculator: Calculator | None = None,
+        control_operation_handler=None,
+        rule_runtime: RuleExecutionRuntime | None = None,
     ) -> None:
         self.working_memory = working_memory
         self.session_id = str(session_id or "default_session")
         self.control_context = deepcopy(control_context or {})
         self.calculator = calculator or Calculator()
+        self.control_operation_handler = control_operation_handler
+        self.rule_runtime = rule_runtime or RuleExecutionRuntime(working_memory, self.calculator, session_id=self.session_id)
 
     def execute(
         self,
@@ -160,6 +175,10 @@ class RuleChainExecutor:
         max_steps: int = DEFAULT_RULE_CHAIN_MAX_STEPS,
         resume: bool = True,
     ) -> ExecutorResult:
+        if any(_rule_from_match(item).get("composition_contract") for item in matched_rules):
+            from .rule_composition import RuleCompositionRuntime
+            return RuleCompositionRuntime(self).execute(matched_rules=matched_rules, chain_id=chain_id,
+                source_match=source_match, max_steps=max_steps, resume=resume)
         normalized_chain_id = chain_id or _stable_id("chain", self.session_id, len(self.working_memory.entries), _utc_now())
         chain_state = self._load_chain_state(normalized_chain_id) if resume else {}
         start_index = int(chain_state.get("executed_step_count", 0) or 0)
@@ -218,12 +237,29 @@ class RuleChainExecutor:
                 result.status = "max_steps_reached"
                 result.ok = False
                 break
-            if not _match_ok(rule_match):
-                step = self._record_blocked_rule(normalized_chain_id, rule_match, "required_not_satisfied")
+            try:
+                rule_match, decision = self.rule_runtime.admit(rule_match, self.control_context)
+            except ActivationError as exc:
+                step = self._record_blocked_rule(normalized_chain_id, rule_match, exc.code, error=str(exc))
                 result.steps.append(step.to_dict())
-                continue
+                result.errors.append({"rule_id": step.rule_id, "error": str(exc), "error_code": exc.code})
+                result.ok = False
+                result.status = "rule_admission_failed"
+                self._finalize_claim_transaction(result, reservation_id)
+                self._finish(result)
+                return result
             rule = _rule_from_match(rule_match)
-            produced_items = _as_dict_list(rule.get("produced"))
+            if decision["status"] == "ready":
+                decision = self.rule_runtime.start(decision, rule_match)
+            result.activation_decisions.append(deepcopy(decision))
+            if decision["status"] != "ready":
+                step = self._record_blocked_rule(normalized_chain_id, rule_match, decision["status"],
+                                                 status=decision["status"], decision=decision)
+                result.steps.append(step.to_dict())
+                result.status = decision["status"]
+                continue
+            rule_match["execution_decision"] = decision
+            produced_items = [rule["produced"][i] for i in decision["produced_indices"]]
             if not produced_items:
                 step = self._record_blocked_rule(normalized_chain_id, rule_match, "rule_has_no_produced")
                 result.steps.append(step.to_dict())
@@ -244,11 +280,13 @@ class RuleChainExecutor:
                 result.produced.append(dict(produced))
                 self._accumulate_result(result, step)
                 if step.status in {"needs_frontend", "output_ready", "stop_path", "error"}:
+                    self.rule_runtime.complete(decision, success=step.status not in {"error", "stop_path"})
                     result.status = step.status
                     result.ok = step.status != "error"
                     self._finalize_claim_transaction(result, reservation_id)
                     self._finish(result)
                     return result
+            self.rule_runtime.complete(decision, success=result.ok and result.status != "max_steps_reached")
             if result.status == "max_steps_reached":
                 break
 
@@ -304,9 +342,15 @@ class RuleChainExecutor:
             event_id=_event_id_from_operation(produced, rule_match),
             required_match=dict(rule_match.get("match") or {}),
             created_at=_utc_now(),
+            execution_decision=deepcopy(rule_match.get("execution_decision", {})),
         )
         event_before = deepcopy(self.working_memory.get_event_workspace(step.event_id)) if step.event_id else None
         try:
+            if is_typed_rule(rule):
+                self.rule_runtime.revalidate(rule_match, step.execution_decision)
+                check_effect(rule, produced)
+                step.required_match = {**deepcopy(step.required_match),
+                                       "require_evaluation": deepcopy(rule_match["require_evaluation"])}
             self.control_context["binding"] = {
                 "event_id": step.event_id, "slot_bindings": _slot_bindings(rule_match),
             }
@@ -317,7 +361,7 @@ class RuleChainExecutor:
                     **validate_task_result(produced["task_result"]),
                     "control_rule_id": step.rule_id,
                 }
-            materialized_knowledge = self._materialize_bound_knowledge(step, rule_match)
+            materialized_knowledge = [] if is_typed_rule(rule) else self._materialize_bound_knowledge(step, rule_match)
             target_workspace = str(produced.get("target_workspace") or "").strip()
             if operation in GRAPH_OPERATIONS and target_workspace == "memory_workspace":
                 step.result = self.working_memory.apply_memory_workspace_operation(
@@ -482,10 +526,20 @@ class RuleChainExecutor:
         step: ExecutorStep,
         rule_match: dict[str, Any],
     ) -> None:
+        rule = _rule_from_match(rule_match)
         if str(step.rule_layer or "").strip().lower() != "control":
             step.status = "error"
             step.error = "control_decide is only valid for control rules"
             return
+        preparations = step.produced.get('before_decide', [])
+        if not isinstance(preparations, list) or any(not isinstance(op, dict) for op in preparations):
+            raise ValueError('before_decide must be a list of declared Control operations')
+        for operation in preparations:
+            if is_typed_rule(rule):
+                check_effect(rule, operation)
+            if self.control_operation_handler is None:
+                raise ValueError('This Control decision requires an operation handler')
+            self.control_context = deepcopy(self.control_operation_handler({**operation, 'rule_id': step.rule_id}))
         branches = _as_dict_list(step.produced.get("branches"))
         selected_branch: dict[str, Any] | None = None
         selected_index = -1
@@ -510,6 +564,9 @@ class RuleChainExecutor:
                 *_as_dict_list(raw_actions),
             ]
         actions = _materialize_control_actions(raw_actions, self.control_context)
+        if is_typed_rule(rule):
+            for action in actions:
+                check_effect(rule, action)
         alignment_reports = []
         expanded_actions = []
         for action in actions:
@@ -559,6 +616,8 @@ class RuleChainExecutor:
                 else:
                     expanded_actions.extend(_as_dict_list(action.get("on_unresolved")))
         actions = expanded_actions
+        actions = [self.rule_runtime.register_control_action(rule, action)
+                   if action.get("operation") == "decide_rule_activation" else action for action in actions]
         if not actions:
             step.status = "error"
             step.error = "control_decide selected no executable action"
@@ -587,7 +646,10 @@ class RuleChainExecutor:
             return
         conclusion_spans = _as_dict_list(step.produced.get("conclusion"))
         explicit_item = step.produced.get("item")
-        if step.operation == "add" and conclusion_spans and not isinstance(explicit_item, dict):
+        typed = bool(step.execution_decision.get("decision_id"))
+        if typed:
+            conclusion_spans = span_output_items(step.produced)
+        if conclusion_spans and (typed or (step.operation == "add" and not isinstance(explicit_item, dict))):
             workspace: dict[str, Any] | None = None
             original = self.working_memory.get_event_workspace(step.event_id)
             expected_version = int(original.get("version", 0))
@@ -601,6 +663,26 @@ class RuleChainExecutor:
                 item = dict(conclusion_span)
                 item.setdefault("span_id", f"{step.step_id}_conclusion_{index + 1}")
                 current_workspace = staged_memory.get_event_workspace(step.event_id)
+                if typed and step.operation == "update":
+                    existing = next((s for s in current_workspace.get("spans", [])
+                                     if s.get("span_id") == item["span_id"]), {})
+                    # An update inherits node descriptors, not the old program
+                    # or the evidence generated for its previous value.
+                    descriptors = deepcopy(existing)
+                    for key in ("calculation", "expression", "value_policy", "result_unit",
+                                "computation", "runtime_value_resolution", "computed_by_rule_id",
+                                "computed_at_step_id", "derived_by_rule_id", "derived_at_step_id",
+                                "activation_fusion", "activation_effects", "confidence",
+                                "source_reliability", "authority_verified", "execution_scope", "rule_execution"):
+                        descriptors.pop(key, None)
+                    metadata = dict(descriptors.get("metadata") or {})
+                    for key in ("derivation_supports", "derived_from_span_ids", "evidence_active",
+                                "confidence_semantics", "source_reliability", "authority_verified",
+                                "measurement_basis", "semantic_alignment"):
+                        metadata.pop(key, None)
+                    descriptors["metadata"] = metadata
+                    item = {**descriptors, **item}
+                computation_workspace = execution_workspace(current_workspace) if step.execution_decision.get("decision_id") else current_workspace
 
                 calculation = item.get("calculation")
                 if calculation is not None:
@@ -610,13 +692,13 @@ class RuleChainExecutor:
                     import json
                     cache_key = json.dumps({k: v for k, v in calculation.items() if k != "output_name"}, sort_keys=True)
                     input_key = json.dumps([
-                        s for s in current_workspace.get("spans", [])
+                        s for s in computation_workspace.get("spans", [])
                         if s.get("span_id") in bindings.values()
                     ], sort_keys=True)
                     cache_key += input_key
                     if cache_key not in calculations:
                         calculations[cache_key] = self.calculator.calculate(
-                            calculation, workspace=current_workspace, slot_bindings=bindings,
+                            calculation, workspace=computation_workspace, slot_bindings=bindings,
                         )
                     computation = calculations[cache_key]
                     output = computation["outputs"].get(calculation.get("output_name"))
@@ -625,14 +707,14 @@ class RuleChainExecutor:
                     item.update(value=output["value"], unit=output.get("unit", ""), computation=computation,
                                 computed_by_rule_id=step.rule_id, computed_at_step_id=step.step_id)
                     _attach_derived_evidence_metadata(item, computation=computation,
-                                                     spans=current_workspace.get("spans", []), rule_id=step.rule_id)
+                                                     spans=computation_workspace.get("spans", []), rule_id=step.rule_id)
                     computations.append(computation)
 
                 value_policy = item.get("value_policy")
                 if isinstance(value_policy, dict):
                     resolution = self.calculator.calculate(
                         {"kind": "value_policy", "value_policy": value_policy},
-                        workspace=current_workspace, slot_bindings=bindings,
+                        workspace=computation_workspace, slot_bindings=bindings,
                     )
                     item["runtime_value_resolution"] = {k: v for k, v in resolution.items() if k != "status"}
                     if not resolution["ok"]:
@@ -657,7 +739,7 @@ class RuleChainExecutor:
                     computation = self.calculator.calculate(
                         {"kind": "expression", "expression": expression,
                          "result_unit": str(item.get("result_unit") or "")},
-                        workspace=current_workspace, slot_bindings=bindings,
+                        workspace=computation_workspace, slot_bindings=bindings,
                     )
                     item["value"] = computation["value"]
                     item["unit"] = computation["unit"]
@@ -667,10 +749,27 @@ class RuleChainExecutor:
                     _attach_derived_evidence_metadata(
                         item,
                         computation=computation,
-                        spans=_as_dict_list(current_workspace.get("spans")),
+                        spans=_as_dict_list(computation_workspace.get("spans")),
                         rule_id=step.rule_id,
                     )
                     computations.append(computation)
+                from .evidence_lifecycle import attach_derivation
+                if step.execution_decision.get("decision_id"):
+                    rule = _rule_from_match(self.rule_runtime.state["candidates"][step.execution_decision["decision_id"]])
+                    check_output(rule, item, step.execution_decision["mode_contract"])
+                    item = apply_output_semantics(item, q=step.execution_decision["q"],
+                                                  decision=step.execution_decision, workspace=computation_workspace)
+                    result_metadata(item, step.execution_decision)
+                proof_bindings = dict(bindings)
+                for cid, contributor in item.get("activation_fusion", {}).get("contributors", {}).items():
+                    proof_bindings.update({f"fusion_{cid}_{slot}": sid for slot, sid in contributor["bindings"].items()})
+                attach_derivation(item, workspace=current_workspace, bindings=proof_bindings,
+                                  rule_id=step.rule_id, step_id=step.step_id)
+                if typed:
+                    # Typed outputs are complete newly justified results. A
+                    # merging update would resurrect removed computation data.
+                    current_workspace["spans"] = [s for s in current_workspace.get("spans", [])
+                                                  if s.get("span_id") != item["span_id"]]
                 workspace = staged_memory.apply_event_workspace_operation(
                     step.event_id,
                     {
@@ -718,7 +817,8 @@ class RuleChainExecutor:
             "target": step.produced.get("target", "spans"),
         }
 
-    def _record_blocked_rule(self, chain_id: str, rule_match: dict[str, Any], reason: str) -> ExecutorStep:
+    def _record_blocked_rule(self, chain_id: str, rule_match: dict[str, Any], reason: str, *,
+                             status: str = "blocked", decision: dict | None = None, error: str = "") -> ExecutorStep:
         rule = _rule_from_match(rule_match)
         step = ExecutorStep(
             chain_id=chain_id,
@@ -727,7 +827,9 @@ class RuleChainExecutor:
             rule_layer=str(rule.get("rule_layer") or ""),
             operation="blocked",
             produced={},
-            status="blocked",
+            status=status,
+            error=error,
+            execution_decision=deepcopy(decision or {}),
             required_match=dict(rule_match.get("match") or {}),
             result={"reason": reason},
             created_at=_utc_now(),
@@ -899,15 +1001,6 @@ def _produced_operation(produced: dict[str, Any]) -> str:
     return operation
 
 
-def _match_ok(rule_match: dict[str, Any]) -> bool:
-    if "match" not in rule_match:
-        return True
-    match = rule_match.get("match")
-    if not isinstance(match, dict):
-        return False
-    return bool(match.get("ok", True))
-
-
 def _bound_span_ids(rule_match: dict[str, Any]) -> set[str]:
     bound: set[str] = set()
 
@@ -929,6 +1022,9 @@ def _bound_span_ids(rule_match: dict[str, Any]) -> set[str]:
 def _slot_bindings(value: dict[str, Any]) -> dict[str, str]:
     """Collect matcher bindings and reject contradictory slot assignments."""
 
+    evaluation = value.get("require_evaluation")
+    if isinstance(evaluation, dict):
+        return dict(evaluation["bindings"])
     bindings: dict[str, str] = {}
 
     def walk(node: Any) -> None:
@@ -1260,10 +1356,14 @@ def _classify_control_actions(
             trigger = control_context.get("trigger") if isinstance(control_context.get("trigger"), dict) else {}
             candidates = _as_dict_list(trigger.get("candidate_rule_paths"))
             path_state = control_context.get("path") if isinstance(control_context.get("path"), dict) else {}
+            selection_policy = action.get('selection_policy') or {}
+            source_selector = trigger.get('source_rule_selector') or {}
+            prefer_memory = bool(selection_policy.get('inherit_memory_path_preference')) and source_selector.get('memory_path_policy') == 'prefer_then_fallback'
             selected = choose_candidate_rule_path(
                 candidates,
-                policy=action.get("selection_policy") if isinstance(action.get("selection_policy"), dict) else {},
+                policy=selection_policy,
                 attempted_rule_ids=_string_list(path_state.get("visited_rule_ids")),
+                memory_preferred_rule_ids=_string_list(source_selector.get('memory_preferred_rule_ids')) if prefer_memory else [],
             )
             if selected is None:
                 stopped_paths.append(
@@ -1281,6 +1381,11 @@ def _classify_control_actions(
                         "selected_by_control_rule_id": str((_rule_from_match(rule_match)).get("rule_id") or ""),
                     }
                 )
+        elif operation == "decide_rule_activation":
+            owner = _rule_from_match(rule_match)
+            if owner.get("rule_layer") != "control":
+                raise ActivationError("invalid_activation_authority", "activation decisions require a Control rule")
+            pending_operations.append({**deepcopy(action), "control_rule_id": owner["rule_id"]})
         elif operation:
             pending = dict(action)
             # Retrieval context must be retained under the Control Rule that
@@ -1294,6 +1399,10 @@ def _classify_control_actions(
                 "retrieve_knowledge",
                 "query_knowledge",
                 "enrich_knowledge",
+                "inspect_goal_requirements",
+                "ground_input_semantics",
+                "review_event_evidence",
+                "inspect_rule_frontier", "inspect_require_gaps", "bind_knowledge_context",
             }:
                 pending.setdefault("rule_id", str((_rule_from_match(rule_match)).get("rule_id") or ""))
             pending_operations.append(pending)
@@ -1407,6 +1516,9 @@ def _render_event_span_output(
         for span in _as_dict_list(workspace.get("spans"))
         if str(span.get("span_id") or span.get("id") or "")
     }
+    from .evidence_lifecycle import evidence_validity
+    validity = evidence_validity(span_index, workspace.get('relations', []))
+    span_index = {sid: span for sid, span in span_index.items() if validity[sid]}
     requested_slot_ids = [
         str(span.get("span_id") or span.get("id") or "").strip()
         for span in _as_dict_list(output.get("conclusion"))

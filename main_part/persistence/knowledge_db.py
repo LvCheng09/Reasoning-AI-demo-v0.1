@@ -188,6 +188,9 @@ def _coerce_record(record: Any, *, embedding_model: str = "") -> dict[str, Any]:
     metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), Mapping) else {}
     metadata.pop("knowledge_network", None)
     metadata.pop("semantic_alignment_definition", None)
+    if metadata.get('span_schema'):
+        from ..knowledge_schema_contract import validate_span_schema
+        validate_span_schema(metadata['span_schema'])
     return {
         "knowledge_id": knowledge_id, "vectors": vectors, "embedding_model": model, "vector_version": version,
         "vector_dimension": next(iter(dimensions), 0), "knowledge_type": kind,

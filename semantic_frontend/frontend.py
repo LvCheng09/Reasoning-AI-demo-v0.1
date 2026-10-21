@@ -136,7 +136,7 @@ class SimpleSemanticFrontend:
                 f"target event not found: {target_event_id}"
             )
 
-        context = self._local_context(
+        context = graph.raw_text if need.get("patch_scope") == "document" else self._local_context(
             graph.raw_text,
             target.source_span,
         )
@@ -150,7 +150,7 @@ class SimpleSemanticFrontend:
         )
 
         scope = need.get("patch_scope", "subtree")
-        if scope not in {"subtree", "attributes_only"}:
+        if scope not in {"subtree", "attributes_only", "document"}:
             raise ValueError("unknown patch_scope")
         if scope == "attributes_only" and (
             patch.get("events_to_add") or patch.get("edges_to_add") or

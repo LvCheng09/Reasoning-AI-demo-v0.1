@@ -47,6 +47,8 @@ def selector_execution_context(selector: Any) -> dict[str, Any]:
         "required_any_rule_tags": list(normalized.get("required_any_rule_tags") or []),
         "excluded_rule_tags": list(normalized.get("excluded_rule_tags") or []),
         "activation_policies": list(normalized.get("activation_policies") or []),
+        "activation_signal": normalized.get("activation_signal"),
+        "activation_weight": normalized.get("activation_weight", 1.0),
         "repair_target_rule_ids": list(normalized.get("repair_target_rule_ids") or []),
         "missing_structure_signatures": list(
             normalized.get("missing_structure_signatures") or []

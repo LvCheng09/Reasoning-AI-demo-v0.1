@@ -598,6 +598,7 @@ class WorkingMemoryState:
     entries: list[WorkingMemoryEntry] = field(default_factory=list)
     zone_entries: dict[str, list[WorkingMemoryEntry]] = field(default_factory=dict)
     event_workspaces: dict[str, dict[str, Any]] = field(default_factory=dict)
+    rule_runtime: dict[str, dict[str, Any]] = field(default_factory=dict)
     _event_claim_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
     _event_transaction_locks: dict[str, Lock] = field(default_factory=dict, init=False, repr=False, compare=False)
     _event_claim_reservations: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -801,6 +802,7 @@ class WorkingMemoryState:
         for zone in self.zone_entries:
             self.zone_entries[zone] = []
         self.event_workspaces.clear()
+        self.rule_runtime.clear()
         with self._event_claim_lock:
             self._event_claim_reservations.clear()
             self._event_claim_consumption.clear()
@@ -1125,6 +1127,8 @@ class WorkingMemoryState:
             "entry_id": entry_id,
             "revision": before_revision + 1,
         }
+
+
 
     def get_event_workspace(self, event_id: str) -> dict[str, Any]:
         normalized_event_id = str(event_id or "").strip()
@@ -1561,6 +1565,7 @@ class WorkingMemoryState:
             },
             "zone_counts": self.zone_counts(),
             "event_workspaces": self.event_workspaces,
+            "rule_runtime": deepcopy(self.rule_runtime),
         }
 
 
@@ -1978,6 +1983,13 @@ class ReasoningRule:
     failure_count: float = 0.0
     support_count: int = 0
     learned_from: list[str] = field(default_factory=list)
+    execution_contract_version: int = 1
+    require_policy: dict[str, Any] = field(default_factory=dict)
+    activation_spec: dict[str, Any] = field(default_factory=dict)
+    q_semantics: dict[str, Any] = field(default_factory=dict)
+    io_contract: dict[str, Any] = field(default_factory=dict)
+    effect_contract: dict[str, Any] = field(default_factory=dict)
+    composition_contract: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2017,6 +2029,13 @@ class ReasoningRule:
             "failure_count": self.failure_count,
             "support_count": self.support_count,
             "learned_from": self.learned_from,
+            "execution_contract_version": self.execution_contract_version,
+            "require_policy": deepcopy(self.require_policy),
+            "activation_spec": deepcopy(self.activation_spec),
+            "q_semantics": deepcopy(self.q_semantics),
+            "io_contract": deepcopy(self.io_contract),
+            "effect_contract": deepcopy(self.effect_contract),
+            "composition_contract": deepcopy(self.composition_contract),
         }
 
 @dataclass

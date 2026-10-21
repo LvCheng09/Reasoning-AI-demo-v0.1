@@ -292,7 +292,8 @@ def _evaluate_node(
         result = _Quantity(left.value - right.value, left.dimensions)
     else:
         if right.value == 0.0:
-            raise StructuredComputationError("division_by_zero", "structured expression denominator is zero")
+            raise StructuredComputationError("division_by_zero", "structured expression denominator is zero",
+                                             details={"used_inputs": dict(used_spans)})
         result = _Quantity(left.value / right.value, _combine_dimensions([left, right], divide=True))
     trace.append({"operator": operator, left_key: left.value, right_key: right.value, "result": result.value})
     return result

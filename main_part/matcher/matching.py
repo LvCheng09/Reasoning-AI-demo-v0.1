@@ -75,6 +75,24 @@ def match_required_bundle_against_graph(
     target: dict[str, Any],
     args: dict[str, Any],
 ) -> dict[str, Any]:
+    """Evaluate original Require, then attach its typed outer evaluation."""
+    from ..rule_execution_contract import is_typed_rule, require_evaluation, validate_rule_contract
+    rule = source.get("execution_rule")
+    if rule is not None:
+        validate_rule_contract(rule)
+    if rule is not None and is_typed_rule(rule):
+        args = {**args, "bundle_match_threshold": rule.get("require_policy", {}).get("bundle_match_threshold", 0.55)}
+    result = _match_required_bundle_against_graph(source, target, args)
+    if rule is not None and is_typed_rule(rule):
+        result["require_evaluation"] = require_evaluation(rule, result)
+    return result
+
+
+def _match_required_bundle_against_graph(
+    source: dict[str, Any],
+    target: dict[str, Any],
+    args: dict[str, Any],
+) -> dict[str, Any]:
     required_items = source["required"]
     rule_id = str(source.get("rule_id") or "")
     rule_layer = str(source.get("rule_layer") or "").strip().lower()
@@ -164,6 +182,7 @@ def match_rules_against_graph(
 ) -> dict[str, Any]:
     candidate_rules = list(rules)
     matched_rules: list[dict[str, Any]] = []
+    partial_rules: list[dict[str, Any]] = []
     rejected_rules: list[dict[str, Any]] = []
     post_match_enabled = bool(args.get("enable_post_match", True))
     post_match_rules: list[dict[str, Any]] = []
@@ -184,7 +203,21 @@ def match_rules_against_graph(
             "rank_score": float(rule.get("_candidate_score", 0.0) or 0.0),
             "routing_score": float(rule.get("_routing_score", 0.0) or 0.0),
             "match_mode": "hard_match",
+            "match_scope": dict(graph["spec"]),
         }
+        from ..rule_execution_contract import is_typed_rule, partial_modes
+        if is_typed_rule(rule):
+            evaluation = outcome["require_evaluation"]
+            item["require_evaluation"] = evaluation
+            item["allowed_partial_modes"] = partial_modes(rule, evaluation)
+            if outcome.get("ok"):
+                matched_rules.append(item)
+            elif item["allowed_partial_modes"]:
+                item["match_mode"] = "partial_require"
+                partial_rules.append(item)
+            else:
+                rejected_rules.append(item)
+            continue
         if outcome.get("ok"):
             matched_rules.append(item)
         else:
@@ -235,6 +268,7 @@ def match_rules_against_graph(
         "target": target_spec,
         "candidate_count": len(rules),
         "matched_count": len(matched_rules),
+        "partial_count": len(partial_rules),
         "selected_count": len(matched_rules),
         "candidate_policy": "control_selected_candidates_then_hard_required_match",
         "routing": dict(routing_metadata or {}),
@@ -244,22 +278,23 @@ def match_rules_against_graph(
         for request in alignment_requirements_from_metadata(item["match"].get("metadata", {}))]
     from ..rule_path_candidates import attach_candidate_rule_paths
 
-    operation = attach_candidate_rule_paths(
-        {
+    operation = {
             "operation": "match",
             "match_type": rules_graph_match_type(graph["spec"], target_spec),
             "source": graph["spec"],
             "target": target_spec,
             "matched_rules": matched_rules,
+            "partial_rules": partial_rules,
             "rejected_rules": rejected_rules,
-        },
-        graph=graph,
-    )
+        }
+    if not any(is_typed_rule(item["rule"]) for item in [*matched_rules, *partial_rules]):
+        operation = attach_candidate_rule_paths(operation, graph=graph)
     if operation.get("requires_control_selection"):
         metadata["selected_count"] = 0
         metadata["candidate_path_count"] = len(operation.get("candidate_rule_paths") or [])
     return {
-        "ok": bool(matched_rules),
+        "ok": bool(matched_rules or partial_rules),
+        "full_match_found": bool(matched_rules),
         "produced": [operation],
         "metadata": metadata,
     }
@@ -316,16 +351,18 @@ def match_required_item(
     for candidate in workspaces:
         from ..alignment_contract import alignment_is_current
         from ..control_state import control_state_span_is_active
-        span_index = {
-            sid: span if alignment_is_current(span, candidate["span_index"], candidate["relations"])
-            and control_state_span_is_active(span)
+        from ..evidence_lifecycle import evidence_validity, EvidenceSpanIndex
+        validity = evidence_validity(candidate["span_index"], candidate["relations"])
+        span_index = EvidenceSpanIndex({
+            sid: span if validity[sid]
             else {
                 **span,
                 "_invalid_alignment": True,
+                "_invalid_derivation": True,
                 "_inactive_control_state": not control_state_span_is_active(span),
             }
             for sid, span in candidate["span_index"].items()
-        }
+        }, validity)
         for candidate_pattern in candidate["patterns"] or [{}]:
             outcome = score_pattern_match(
                 pattern,
@@ -977,9 +1014,9 @@ def best_span_slot_match(
         candidate_span = span_index.get(candidate_span_id) or candidate.get("span") or candidate
         from ..alignment_contract import alignment_is_current
         from ..control_state import control_state_span_is_active
+        from ..evidence_lifecycle import span_evidence_is_current
         if (
-            not alignment_is_current(candidate_span, span_index)
-            or not control_state_span_is_active(candidate_span)
+            not span_evidence_is_current(candidate_span, span_index)
         ):
             continue
         result = structured_slot_match(required, candidate_span)

@@ -27,7 +27,7 @@ class RuntimeLauncher:
     ) -> None:
         self.scheduler = scheduler
         self.working_memory = working_memory or scheduler.working_memory
-        self.scheduler.working_memory = self.working_memory
+        self.scheduler.bind_working_memory(self.working_memory)
         self.poll_interval = max(0.01, float(poll_interval))
         self.processed_entry_ids: set[str] = set()
         if max_attempts < 1:
@@ -55,15 +55,20 @@ class RuntimeLauncher:
                 continue
             # A retry restarts from pre-delivery in-memory state, never from a
             # half-executed graph. Persistent/tool effects remain at-least-once.
-            fields = ("entries", "zone_entries", "event_workspaces", "_event_claim_reservations", "_event_claim_consumption")
+            fields = ("entries", "zone_entries", "event_workspaces", "rule_runtime", "_event_claim_reservations", "_event_claim_consumption")
             checkpoint = deepcopy((self.scheduler.state, {name: getattr(self.working_memory, name) for name in fields}))
             attempt = int(delivery.get("attempts", 0)) + 1
             try:
-                self.scheduler.clear_transient_state(clear_outputs=True, clear_errors=True, clear_runtime_workspaces=False)
-                payload = dict(entry.payload)
-                payload.pop("_runtime_delivery", None)
-                self.scheduler.receive_input(payload, source="runtime_launcher")
+                if delivery.get("status") != "waiting_activation":
+                    self.scheduler.clear_transient_state(clear_outputs=True, clear_errors=True, clear_runtime_workspaces=False)
+                    payload = dict(entry.payload)
+                    payload.pop("_runtime_delivery", None)
+                    self.scheduler.receive_input(payload, source="runtime_launcher")
                 self.scheduler.run()
+                if self.scheduler.state.status == "waiting_activation":
+                    entry.payload["_runtime_delivery"] = {"status": "waiting_activation", "attempts": attempt - 1,
+                        "not_before": self.scheduler.rule_runtime.waiting_until()}
+                    break
                 if self.scheduler.state.status != "completed":
                     raise RuntimeError(f"scheduler did not complete: {self.scheduler.state.status}; {self.scheduler.state.blocking_reason}")
             except Exception as exc:

@@ -11,6 +11,7 @@ import os
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 
 from .data_structure import WorkingMemoryState
@@ -21,10 +22,12 @@ from .frontend_semantic import frontend_from_env, validate_frontend_selection, R
 from .frontend_working_memory_bridge import submit_frontend_state_to_working_memory
 from .memory_redis import build_memory_redis_cache_from_env
 from .memory_workspace import select_memory_workspace_context
+from .rule_layers import CONTENT_LAYERS, normalize_rule_layer
 from .rule_vector_encoder import RuleVectorEncoder
 from .runtime_launcher import RuntimeLauncher
 from .runtime_databases import default_db_paths, validate_runtime_db_paths
 from .scheduler_new import SchedulerNew
+from .persistence import rule_db as rule_db_persistence
 
 
 class MainPartModelLauncher:
@@ -52,7 +55,7 @@ class MainPartModelLauncher:
     ) -> None:
         validate_frontend_selection()
         if frontend_adapter is not None:
-            llm = getattr(getattr(frontend_adapter, "frontend", None), "llm", None)
+            llm = getattr(getattr(frontend_adapter, "frontend", frontend_adapter), "llm", None)
             if getattr(llm, "model", REQUIRED_FRONTEND_MODEL) != REQUIRED_FRONTEND_MODEL:
                 raise ValueError(f"frontend adapter must use {REQUIRED_FRONTEND_MODEL}")
         if scheduler is not None:
@@ -61,8 +64,9 @@ class MainPartModelLauncher:
             if resolved_db_paths != scheduler_paths:
                 raise ValueError("launcher and provided scheduler must use the same runtime databases")
         else:
-            resolved_db_paths = validate_runtime_db_paths(_default_db_paths() if db_paths is None else db_paths)
-        self.working_memory = working_memory or WorkingMemoryState()
+            resolved_db_paths = validate_runtime_db_paths(default_db_paths() if db_paths is None else db_paths)
+        self.working_memory = (working_memory if working_memory is not None else
+                               scheduler.working_memory if scheduler is not None else WorkingMemoryState())
         self.session_id = str(session_id)
         self.auto_run = bool(auto_run)
         self.clear_previous_transient_state = bool(clear_previous_transient_state)
@@ -94,7 +98,11 @@ class MainPartModelLauncher:
             vector_encoder=self.vector_encoder,
             memory_cache=self.memory_cache,
         )
-        self.scheduler.working_memory = self.working_memory
+        if scheduler is not None and getattr(scheduler.frontend, "__func__", None) is SchedulerNew._default_frontend_patcher:
+            # A supplied scheduler still needs the launcher's actual frontend.
+            # Preserve a deployment's explicitly supplied stage.
+            scheduler.frontend = self._frontend_patch_stage
+        self.scheduler.bind_working_memory(self.working_memory)
         self.scheduler.vector_encoder = self.vector_encoder
         self.scheduler.memory_cache = self.memory_cache
         self.runtime = RuntimeLauncher(self.scheduler, working_memory=self.working_memory, max_attempts=runtime_max_attempts)
@@ -258,6 +266,8 @@ class MainPartModelLauncher:
             style_instruction=style_instruction,
         )
 
+
+
     def runtime_summary(self) -> dict[str, Any]:
         state = self.scheduler.state
         return {
@@ -324,14 +334,71 @@ class MainPartModelLauncher:
         }
 
     def _get_frontend_adapter(self) -> FrontendEventBuilder:
-        # Graph-only callers do not need an API client or credentials.
         if self.frontend_adapter is None:
             self.frontend_adapter = frontend_from_env()
         return self.frontend_adapter
 
     def build_frontend_state(self, game_input: Mapping[str, Any]) -> dict[str, Any]:
+        provided = game_input.get("frontend_state") or game_input.get("frontend_output")
+        if isinstance(provided, Mapping):
+            return self._normalize_frontend_state(dict(provided), game_input)
         adapter = self._get_frontend_adapter()
         return dict(adapter.build_event_graph(game_input))
+
+
+
+    def submit_require_answer(self, request_id: str, *, span_updates: list[dict], source: str) -> dict:
+        """Resume a reported gap using sourced additions, never silent overwrites."""
+        if not isinstance(source, str) or not source.strip() or not span_updates:
+            raise ValueError('A clarification needs nonempty sourced evidence')
+        requests = self.scheduler.rule_runtime.state.get('require_requests', {})
+        request = requests.get(request_id)
+        if request is None or request.get('answered'):
+            raise ValueError('Unknown or already answered Require request')
+        workspaces = deepcopy(request['event_graphs'])
+        if len(workspaces) != 1:
+            raise ValueError('Clarification currently requires one event workspace')
+        workspace = next(iter(workspaces.values()))
+        index = {s['span_id']: s for s in workspace.get('spans', [])}
+        changed = False
+        for update in span_updates:
+            sid = update.get('span_id')
+            if not isinstance(sid, str) or not sid:
+                raise ValueError('Clarification spans need explicit IDs')
+            existing = index.get(sid)
+            if existing is None:
+                existing = deepcopy(update)
+                workspace['spans'].append(existing)
+                index[sid] = existing
+                changed = True
+            else:
+                for key, value in update.items():
+                    if key == 'span_id':
+                        continue
+                    if key == 'semantic_relations':
+                        for relation in value:
+                            if any(old.get('core') == relation.get('core') and old.get('relation') == relation.get('relation') and old.get('nature') != relation.get('nature') for old in existing.get(key, [])):
+                                request.setdefault('conflicting_answers', []).append({'source': source, 'candidate': deepcopy(update)})
+                                raise ValueError('Clarification contradicts an existing relation; explicit resolution is required')
+                            if relation not in existing.get(key, []):
+                                existing.setdefault(key, []).append(deepcopy(relation))
+                                changed = True
+                    elif key in existing and existing[key] != value:
+                        request.setdefault('conflicting_answers', []).append({'source': source, 'candidate': deepcopy(update)})
+                        raise ValueError('Clarification conflicts with existing evidence; explicit resolution is required')
+                    elif key not in existing:
+                        existing[key] = deepcopy(value)
+                        changed = True
+            existing.setdefault('metadata', {}).setdefault('clarification_sources', []).append(
+                {'request_id': request_id, 'source': source})
+        if not changed:
+            raise ValueError('Clarification contains no new evidence')
+        event = {k: deepcopy(v) for k, v in workspace.items() if k not in {'spans', 'relations'}}
+        event['evidence_span_ids'] = list(index)
+        event['relations'] = deepcopy(workspace.get('relations', []))
+        request['answered'] = True
+        return self.submit_event_graph({'input': request['report'].get('source_text', ''), 'clarification_for': request_id},
+            {'spans': list(index.values()), 'events': [event]}, source='require_clarification')
 
     def build_frontend_patch_state(
         self, *, game_input: Mapping[str, Any],
@@ -430,6 +497,8 @@ class MainPartModelLauncher:
             }
         requests: list[tuple[dict[str, Any], str, str]] = []
         for span in spans:
+            if isinstance(span.get("semantic_concept"), str) and span["semantic_concept"].strip():
+                requests.append((span, "concept_vector", span["semantic_concept"]))
             core_text = str(span.get("core") or "").strip()
             nature_text = str(span.get("nature") or "").strip()
             relation_text = str(span.get("relation") or "").strip()
@@ -449,6 +518,8 @@ class MainPartModelLauncher:
             for semantic_relation in span.get("semantic_relations", []) or []:
                 if not isinstance(semantic_relation, dict):
                     continue
+                if isinstance(semantic_relation.get("semantic_concept"), str) and semantic_relation["semantic_concept"].strip():
+                    requests.append((semantic_relation, "concept_vector", semantic_relation["semantic_concept"]))
                 debug = semantic_relation.get("debug") if isinstance(semantic_relation.get("debug"), Mapping) else {}
                 requests.extend(
                     [
@@ -522,6 +593,8 @@ class MainPartModelLauncher:
             json.dumps(game_input.get("options") or [], ensure_ascii=False),
         ]
         return "\n".join(part for part in parts if part.strip())
+
+
 
 
 
@@ -706,6 +779,18 @@ def _dedupe_relations(relations: list[dict[str, Any]], *, evidence_ids: list[str
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 def _single_event_from_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "event_id": "e1",
@@ -723,6 +808,7 @@ def _single_event_from_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _default_db_paths() -> dict[str, str]:
+    """Use the same isolated runtime database entry as the public launcher."""
     return default_db_paths()
 
 
@@ -815,7 +901,7 @@ _FRONTEND_FORBIDDEN_SUPERVISION_KEYS = frozenset(
     }
 )
 _FRONTEND_FORBIDDEN_PACKET_MARKERS = frozenset(
-    {"expert_feedback", "diagnostic_feedback"}
+    {"expert_feedback", "diagnostic_feedback", "auto_learn_feedback"}
 )
 
 
@@ -830,7 +916,9 @@ def _reject_supervision_at_frontend_boundary(game_input: Mapping[str, Any]) -> N
         return
     details = [*violations, *(f"packet:{marker}" for marker in packet_markers)]
     raise ValueError(
-        "frontend inference input cannot contain supervision: "
+        "frontend inference input cannot contain supervision; "
+        "submit expected answers and training feedback only after inference through "
+        "a separately installed learning system: "
         + ", ".join(details[:12])
     )
 
@@ -866,6 +954,19 @@ def _supervision_field_paths(value: Any) -> list[str]:
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
 def _compact_execution_result(item: Mapping[str, Any]) -> dict[str, Any]:
     result = item.get("result") if isinstance(item.get("result"), Mapping) else {}
     output = result.get("output") if isinstance(result.get("output"), Mapping) else {}
@@ -891,6 +992,19 @@ def _compact_execution_result(item: Mapping[str, Any]) -> dict[str, Any]:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _rule_kind_for_layer(layer: Any) -> str:
+    normalized = normalize_rule_layer(layer)
+    if normalized in {"control", "matcher_rule"}:
+        return "control"
+    if normalized == "meta":
+        return "meta"
+    if normalized == "structure":
+        return "structural"
+    if normalized in CONTENT_LAYERS:
+        return "content"
+    return "content"
 
 
 __all__ = ["MainPartModelLauncher"]

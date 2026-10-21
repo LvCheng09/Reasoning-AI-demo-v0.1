@@ -1,0 +1,58 @@
+{
+  "schema": "rule_network_demo.v2",
+  "installed": {
+    "version": 1,
+    "migrated_rules": [
+      "dso_calc_direct",
+      "dso_calc_from_turnover",
+      "dso_calc_reverse_sales",
+      "a_scale_supply_cash_conversion_cycle_extended_v1",
+      "a_scale_supply_delivery_delay_risk_v1",
+      "a_scale_supply_delivery_service_risk_v1",
+      "a_scale_supply_excess_inventory_risk_v1",
+      "a_scale_supply_inventory_capital_tied_up_v1",
+      "a_scale_supply_inventory_obsolescence_risk_v1",
+      "a_scale_supply_landed_cost_pressure_v1",
+      "a_scale_supply_lost_sales_risk_v1",
+      "a_scale_supply_planning_instability_v1",
+      "a_scale_supply_revenue_timing_risk_v1",
+      "a_scale_supply_reverse_logistics_cost_pressure_v1",
+      "a_scale_supply_stockout_exposure_v1",
+      "a_scale_supply_supplier_cash_pressure_v1",
+      "a_scale_supply_supplier_disruption_exposure_v1",
+      "a_scale_supply_unit_cost_pressure_v1"
+    ],
+    "selection_controls": [
+      "dso_execution_selection_control",
+      "supply_execution_selection_control"
+    ],
+    "recovery_controls": [
+      "control_require_action_resume",
+      "control_require_route_resume",
+      "control_require_action_missing_relation",
+      "control_require_route_missing_relation",
+      "control_require_action_derivation",
+      "control_require_route_derivation",
+      "control_require_action_reextract",
+      "control_require_route_reextract",
+      "control_require_action_unknown",
+      "control_require_route_unknown",
+      "control_require_action_conflict",
+      "control_require_route_conflict",
+      "control_require_action_condition_false",
+      "control_require_route_condition_false",
+      "control_require_recovery_router"
+    ],
+    "adjusted_control": "control_runtime_entry_001",
+    "trains_parameters": false,
+    "parameter_origin": "authored, not calibrated"
+  },
+  "seed_sha256": "f0396f03fb70c72370a0a1b914d6e414a14c3817476e6993dad1ed7127ff4fa2",
+  "rules": 210,
+  "knowledge": 106,
+  "rule_layers": {
+    "control": 124,
+    "domain": 86
+  },
+  "source_policy": "Previously released business Rule inventory, updated inference contracts, generic Control additions and Knowledge. No learning Rules, personal Memory, benchmark inputs or results."
+}

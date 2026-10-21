@@ -62,12 +62,12 @@ def extract_event_method_signature(event: Mapping[str, Any]) -> dict[str, Any]:
         ],
         limit=18,
     )
-    rule_trace = workspace.get("rule_trace") if isinstance(workspace.get("rule_trace"), Mapping) else {}
+    learning_trace = workspace.get("learning_trace") if isinstance(workspace.get("learning_trace"), Mapping) else {}
     path_roles = _dedupe(
         [
             *[str(item.get("learning_role") or "") for item in _as_list(event.get("candidate_paths")) if isinstance(item, Mapping)],
             *[str(item.get("learning_role") or "") for item in _as_list(workspace.get("candidate_paths")) if isinstance(item, Mapping)],
-            *[str(item) for item in _as_list(rule_trace.get("executed_rule_ids"))],
+            *[str(item) for item in _as_list(learning_trace.get("executed_rule_ids"))],
         ]
     )
     feedback_signal = _feedback_signal_from_payload(event)
@@ -306,12 +306,12 @@ def _memory_record_to_candidate(record: Any) -> dict[str, Any]:
     workspace = event_graph.get("workspace") if isinstance(event_graph.get("workspace"), Mapping) else {}
     metadata = event_graph.get("metadata") if isinstance(event_graph.get("metadata"), Mapping) else {}
     legacy_context = metadata.get("legacy_context") if isinstance(metadata.get("legacy_context"), Mapping) else {}
-    execution_trace = payload.get("execution_trace") if isinstance(payload.get("execution_trace"), Mapping) else {}
-    rule_trace = (
-        execution_trace.get("rule_trace")
-        if isinstance(execution_trace.get("rule_trace"), Mapping)
-        else workspace.get("rule_trace")
-        if isinstance(workspace.get("rule_trace"), Mapping)
+    auto_trace = payload.get("auto_learning_trace") if isinstance(payload.get("auto_learning_trace"), Mapping) else {}
+    learning_trace = (
+        auto_trace.get("learning_trace")
+        if isinstance(auto_trace.get("learning_trace"), Mapping)
+        else workspace.get("learning_trace")
+        if isinstance(workspace.get("learning_trace"), Mapping)
         else {}
     )
     relation_terms = _top_terms(
@@ -330,7 +330,7 @@ def _memory_record_to_candidate(record: Any) -> dict[str, Any]:
     path_roles = _dedupe(
         [
             *[str(item.get("learning_role") or "") for item in _as_list(workspace.get("candidate_paths")) if isinstance(item, Mapping)],
-            *[str(item) for item in _as_list(rule_trace.get("executed_rule_ids"))],
+            *[str(item) for item in _as_list(learning_trace.get("executed_rule_ids"))],
         ]
     )
     method_parts = [
@@ -362,7 +362,7 @@ def _memory_record_to_candidate(record: Any) -> dict[str, Any]:
         "conclusion_terms": conclusion_terms,
         "path_roles": path_roles,
         "feedback_signal": _feedback_signal_from_payload(payload),
-        "rule_trace": dict(rule_trace),
+        "learning_trace": dict(learning_trace),
         "source": "long_term_memory",
         **_graph_topology_signature(event_graph),
         "debug_only_text": True,
@@ -390,9 +390,9 @@ def _graph_topology_signature(value: Mapping[str, Any]) -> dict[str, Any]:
         has_vector = int(bool(_extract_vectors(relation)))
         relation_topology.append(f"{source_position}>{target_position}:v{has_vector}")
 
-    rule_trace = workspace.get("rule_trace") if isinstance(workspace.get("rule_trace"), Mapping) else {}
+    learning_trace = workspace.get("learning_trace") if isinstance(workspace.get("learning_trace"), Mapping) else {}
     rule_sequences: list[list[str]] = []
-    executed = [str(item) for item in _as_list(rule_trace.get("executed_rule_ids")) if str(item)]
+    executed = [str(item) for item in _as_list(learning_trace.get("executed_rule_ids")) if str(item)]
     if executed:
         rule_sequences.append(executed)
     for path in [
@@ -519,18 +519,18 @@ def _group_memory_evidence(
 def _feedback_signal_from_payload(payload: Mapping[str, Any]) -> str:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
     workspace = payload.get("workspace") if isinstance(payload.get("workspace"), Mapping) else {}
-    execution_trace = payload.get("execution_trace") if isinstance(payload.get("execution_trace"), Mapping) else {}
+    auto_trace = payload.get("auto_learning_trace") if isinstance(payload.get("auto_learning_trace"), Mapping) else {}
     for value in (
         metadata.get("feedback_signal"),
         workspace.get("feedback_signal"),
-        execution_trace.get("feedback_signal"),
+        auto_trace.get("feedback_signal"),
     ):
         signal = str(value or "").strip().lower()
         if signal:
             return signal
     for feedback in [
         *_as_list(workspace.get("feedback")),
-        *_as_list(execution_trace.get("feedback")),
+        *_as_list(auto_trace.get("feedback")),
     ]:
         if isinstance(feedback, Mapping):
             signal = str(feedback.get("feedback_signal") or feedback.get("signal") or "").strip().lower()
@@ -604,8 +604,8 @@ _SEMANTIC_ROOT_KEYS = {
     "event_workspaces",
     "feedback",
     "supervision",
-    "rule_trace",
-    "execution_trace",
+    "learning_trace",
+    "auto_learning_trace",
     "execution_results",
     "output",
     "completion",

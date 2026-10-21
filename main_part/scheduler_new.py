@@ -2,8 +2,8 @@
 
 This module is intentionally independent from the old long pipeline scheduler.
 Working memory is treated as a partitioned data store. SchedulerNew owns only
-runtime state, controller feedback, dispatch order, interruption, and output
-gating.
+runtime state, controller feedback, dispatch order, interruption, output gating,
+and inference completion.
 """
 
 from __future__ import annotations
@@ -22,7 +22,10 @@ from .executor_new import DEFAULT_RULE_CHAIN_MAX_STEPS, execute_rule_chain
 from .calculator import Calculator
 from .identity import new_runtime_id, stable_content_id
 from .matcher import match_source_to_target
-from .memory_workspace import select_memory_workspace_context
+from .memory_workspace import (
+    select_memory_workspace_context,
+)
+from .persistence import memory_db as memory_db_persistence
 from .persistence import knowledge_db as knowledge_db_persistence
 from .retrieval import (
     build_missing_knowledge_queries,
@@ -32,6 +35,10 @@ from .retrieval import (
     retrieve_memory,
 )
 from .rule_layers import CONTENT_LAYERS
+from .rule_path_candidates import choose_candidate_rule_path
+from .rule_execution_runtime import RuleExecutionRuntime
+from .rule_execution_contract import is_typed_rule, digest, contract_digest
+from .activation_semantics import ActivationError, number as activation_number
 from .rule_selector import normalize_rule_selector, normalize_rule_selectors, selector_execution_context
 
 
@@ -536,6 +543,7 @@ class SchedulerNew:
         memory_cache: Any = None,
         max_loops: int = 128,
         max_rule_chain_steps: int = DEFAULT_RULE_CHAIN_MAX_STEPS,
+        activation_clock=None,
     ) -> None:
         self.working_memory = working_memory
         self.state = SchedulerNewState(
@@ -545,10 +553,11 @@ class SchedulerNew:
             max_rule_chain_steps=max(1, int(max_rule_chain_steps)),
         )
         self.controller = controller or self._default_controller
-        self.event_builder = event_builder or self._default_stage("event_build")
+        self.event_builder = event_builder or self._default_event_builder
         self.rule_matcher = rule_matcher or self._default_rule_matcher
         self.executor = executor or self._default_executor
         self.calculator = calculator or Calculator(self._rule_db_path() or None)
+        self.rule_runtime = RuleExecutionRuntime(working_memory, self.calculator, session_id=session_id, clock=activation_clock)
         self.frontend = frontend or self._default_frontend_patcher
         self.output_decoder = output_decoder or self._default_output_decoder
         self.vector_encoder = vector_encoder
@@ -601,6 +610,191 @@ class SchedulerNew:
         )
         if clear_working_memory:
             self.working_memory.clear()
+        self.rule_runtime = RuleExecutionRuntime(self.working_memory, self.calculator, session_id=next_session_id,
+                                                  clock=self.rule_runtime.clock)
+        self.rule_runtime.reset_for_task()
+
+    def _execute_rule_chain(self, *, matched_rules: list[dict[str, Any]], chain_id: str | None = None,
+                            source_match: dict[str, Any] | None = None, max_steps: int | None = None) -> dict[str, Any]:
+        """The one admission/activation runtime used by every execution caller."""
+        context = self._current_control_context()
+        frame_id = context.get("trigger", {}).get("composition_frame_id")
+        frame = self.rule_runtime.state.get("frames", {}).get(frame_id)
+        budget = frame["budget"] if frame and all(m.get("rule", m).get("rule_layer") == "control" for m in matched_rules) else None
+        effective_max = self.state.max_rule_chain_steps if max_steps is None else max_steps
+        if budget is not None:
+            effective_max = min(effective_max, frame["end_limit"] - budget["used"])
+        result = execute_rule_chain(rule_runtime=self.rule_runtime, calculator=self.calculator,
+            matched_rules=matched_rules, chain_id=chain_id, source_match=source_match,
+            working_memory=self.working_memory, session_id=self.state.session_id,
+            control_context=context, control_operation_handler=self._prepare_control_decision,
+            max_steps=max(0, effective_max))
+        if budget is not None:
+            budget["used"] += len(result["steps"])
+        return result
+
+    def bind_working_memory(self, memory: WorkingMemoryState) -> None:
+        self.working_memory = memory
+        self.rule_runtime = RuleExecutionRuntime(memory, self.calculator, session_id=self.state.session_id,
+                                                  clock=self.rule_runtime.clock)
+
+    def _prepare_activation_candidates(self, produced: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unresolved = []
+        for operation in produced:
+            if operation.get("operation") != "match":
+                continue
+            ready = []
+            for item in [*operation.get("matched_rules", []), *operation.get("partial_rules", [])]:
+                if not is_typed_rule(item.get("rule", item)):
+                    ready.append(item)
+                    continue
+                if item.get("rule", item).get("require_policy", {}).get("execution_selection") == "control":
+                    if "candidate_execution_mode" in item:
+                        current = self.rule_runtime.inspect(item, self._current_control_context())
+                        if current["candidate_id"] in self.rule_runtime.state["authorizations"]:
+                            ready.append(current)
+                        else:
+                            unresolved.extend(self.rule_runtime.execution_candidates(item, self._current_control_context()))
+                    else:
+                        unresolved.extend(self.rule_runtime.execution_candidates(item, self._current_control_context()))
+                    continue
+                current = self.rule_runtime.inspect(item, self._current_control_context())
+                rule = current["rule"]
+                if rule.get("require_policy", {}).get("q_selection") == "control" and current["candidate_id"] not in self.rule_runtime.state["authorizations"]:
+                    unresolved.append(current)
+                elif (current["require_evaluation"]["full_match"]
+                        or rule.get("require_policy", {}).get("partial_mode") == "declared"
+                        or current["candidate_id"] in self.rule_runtime.state["authorizations"]):
+                    ready.append(current)
+                else:
+                    unresolved.append(current)
+            operation["matched_rules"] = ready
+            operation["partial_rules"] = []
+            if not operation.get("candidate_rule_paths"):
+                from .rule_path_candidates import attach_candidate_rule_paths
+                from .matcher.routing import graph_bundle_from_spec
+                graph = graph_bundle_from_spec({"type": "event_workspace"}, None, self.working_memory)
+                updated = attach_candidate_rule_paths(operation, graph=graph)
+                operation.update(updated)
+            for path in operation.get("candidate_rule_paths", []):
+                path["matched_rules"] = [self.rule_runtime.inspect(m, self._current_control_context())
+                                          if is_typed_rule(m.get("rule", m)) else m for m in path["matched_rules"]]
+        return unresolved
+
+    def _request_activation_control(self, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        # Finish representation enrichment before freezing the choice set.
+        # Composite children can create spans between rule-match phases; the
+        # next Control match must not mutate those candidate inputs afterward.
+        if self.vector_encoder is not None:
+            status = _ensure_match_workspace_vectors(self.working_memory, self.vector_encoder)
+            if not status.get("ok"):
+                raise ActivationError("candidate_vectorization_failed", str(status))
+        candidates = [self.rule_runtime.inspect(c, c.get("activation_context", {})) for c in candidates]
+        from .activation_policies import selection_scope_tag
+        selection_sets = [{e['comparison_key'] for e in c['resolved_q'].get('selection', [])}
+                          for c in candidates if c['rule'].get('require_policy', {}).get('execution_selection') == 'control']
+        common_keys = set.intersection(*selection_sets) if selection_sets else set()
+        if selection_sets and not common_keys:
+            raise ActivationError('incomparable_execution_scores', 'candidate set has no common score meaning')
+        roots = {c.get("composition_parent_frame") for c in candidates if c.get("composition_parent_frame")}
+        self.state.control_context = self._build_control_context(trigger={
+            "kind": "rule_activation_decision_required", "has_activation_candidates": bool(candidates),
+            "activation_candidates": deepcopy(candidates), "composition_frame_id": next(iter(roots)) if len(roots) == 1 else None})
+        return {"phase": "rule_match", "status": "activation_control_requested", "active_rule_ids": [],
+                "pending_rule_selectors": [normalize_rule_selector({"rule_layer": "control",
+                    "required_rule_tags": ["rule_activation_decision"], "control_invocation": True,
+                    "required_any_rule_tags": [selection_scope_tag(key) for key in sorted(common_keys)],
+                    "execute_top_k": 1})]}
+
+    def _resolve_rule_activation(self, operation: dict[str, Any]) -> dict[str, Any]:
+        """Apply a normal Control rule's declared decision to retained candidates."""
+        owners = _load_rule_records_by_ids(self._rule_db_path(), [str(operation.get("control_rule_id") or "")])
+        if len(owners) != 1 or owners[0].get("rule_layer") != "control":
+            raise ActivationError("invalid_activation_authority", "an active stored Control rule is required")
+        owner = owners[0]
+        from .matcher.routing import rule_is_executable_candidate
+        if not rule_is_executable_candidate(owner):
+            raise ActivationError("inactive_activation_authority", owner["rule_id"])
+        saved_action = self.rule_runtime.state.get("control_actions", {}).get(operation.get("control_action_id"))
+        actual_action = {k: v for k, v in operation.items() if k not in {"control_action_id", "control_rule_id"}}
+        if (saved_action is None or saved_action["action"] != actual_action
+                or saved_action["control_contract_digest"] != contract_digest(owner)):
+            raise ActivationError("invalid_activation_decision", "decision must come from the actual Control execution")
+        def declares(value):
+            if isinstance(value, dict):
+                return value.get("operation") == "decide_rule_activation" or any(declares(v) for v in value.values())
+            return isinstance(value, list) and any(declares(v) for v in value)
+        if not declares(owner.get("produced", [])):
+            raise ActivationError("undeclared_activation_decision", owner["rule_id"])
+        candidates = self._current_control_context().get("trigger", {}).get("activation_candidates", [])
+        requested = operation.get("candidate_id")
+        if requested:
+            candidates = [c for c in candidates if c["candidate_id"] == requested]
+        if not candidates:
+            raise ActivationError("unknown_activation_candidate", str(requested))
+        if operation.get("action") != "select_execution" and any(
+                c["rule"].get("require_policy", {}).get("execution_selection") == "control" for c in candidates):
+            raise ActivationError("execution_selection_policy_required", "mode candidates require a Q selection policy")
+        if operation.get("action") == "select_execution":
+            from .execution_selection import select_execution
+            refreshed = []
+            for candidate in candidates:
+                current = self.rule_runtime.inspect(candidate, candidate.get("activation_context", {}))
+                if current["candidate_id"] != candidate["candidate_id"]:
+                    raise ActivationError("stale_activation_candidate", candidate["candidate_id"])
+                refreshed.append(current)
+            selected, trace = select_execution(refreshed, operation["selection_policy"], seed=self.rule_runtime.state["seed"])
+            trace.update(control_rule_id=owner["rule_id"], control_contract_digest=contract_digest(owner),
+                         function_versions=deepcopy(self.rule_runtime.state.get("function_versions", {})))
+            self.rule_runtime.state.setdefault("selections", {})[trace["selection_id"]] = trace
+            if selected is None:
+                return {"operation": "activation_control_reject", "reason": "no_eligible_candidate", "selection_id": trace["selection_id"]}
+            admitted = self.rule_runtime.authorize(selected["candidate_id"], mode=selected["candidate_execution_mode"],
+                q_profile=selected.get("candidate_q_profile"), control_rule=owner)
+            auth = self.rule_runtime.state["authorizations"][selected["candidate_id"]]
+            auth["selection_id"] = trace["selection_id"]
+            if admitted.get("composition_parent_frame"):
+                return {"operation": "resume_rule_composition", "frame_id": admitted["composition_parent_frame"]}
+            return {"operation": "match", "matched_rules": [admitted]}
+        signal = operation.get("rank_signal")
+        if signal:
+            candidates = sorted(candidates, key=lambda c: activation_number(c["activation"]["signals"][signal]["value"]), reverse=True)
+        selected = candidates[0]
+        action = operation.get("action")
+        if action in {"execute_partial", "execute_full"}:
+            mode = operation.get("execution_mode")
+            if action == "execute_full":
+                mode = "full"
+            if not mode:
+                allowed = selected["allowed_partial_modes"]
+                if len(allowed) != 1:
+                    raise ActivationError("ambiguous_partial_mode", selected["rule"]["rule_id"])
+                mode = allowed[0]
+            admitted = self.rule_runtime.authorize(selected["candidate_id"], mode=mode, control_rule=owner,
+                                                    q_profile=operation.get("q_profile"))
+            if admitted.get("composition_parent_frame"):
+                return {"operation": "resume_rule_composition", "frame_id": admitted["composition_parent_frame"]}
+            return {"operation": "match", "matched_rules": [admitted]}
+        if action == "retry":
+            if selected.get("composition_parent_frame"):
+                return {"operation": "resume_rule_composition", "frame_id": selected["composition_parent_frame"]}
+            return {"operation": "run_rule", "rule_ids": [selected["rule"]["rule_id"]]}
+        if action == "defer":
+            self.rule_runtime.state.setdefault("control_waiting", {})[selected["candidate_id"]] = {
+                "rule_match": deepcopy(selected), "state_digest": digest(self.working_memory.event_workspaces)}
+            return {"operation": "activation_control_wait", "candidate_id": selected["candidate_id"]}
+        if action == "reject":
+            root = selected.get("composition_parent_frame")
+            if root:
+                for frame in self.rule_runtime.state.get("frames", {}).values():
+                    if frame["root_frame_id"] == root and frame["status"] == "waiting":
+                        frame["status"] = "failed"
+                        frame["result"].update(ok=False, status="composition_failed")
+                        frame["result"]["errors"].append({"error_code": "composition_child_rejected", "rule_id": selected["rule"]["rule_id"]})
+                        parent_decision = self.rule_runtime.state["decisions"][frame["decision_id"]]
+                        self.rule_runtime.complete(parent_decision, success=False)
+            return {"operation": "activation_control_reject", "candidate_id": selected["candidate_id"]}
+        raise ActivationError("unsupported_activation_decision", str(action))
 
     def clear_transient_state(
         self,
@@ -610,6 +804,7 @@ class SchedulerNew:
         clear_working_memory: bool = False,
         clear_runtime_workspaces: bool = True,
     ) -> None:
+        self.rule_runtime.reset_for_task()
         self.calculator.reset_versions()
         self.state.status = "idle"
         self.state.phase = "controller"
@@ -638,7 +833,11 @@ class SchedulerNew:
         if clear_errors:
             self.state.errors.clear()
         if clear_working_memory:
+            runtime_state = self.rule_runtime.state
             self.working_memory.clear()
+            # Reattach only this task's reset state, not previous permissions.
+            self.working_memory.rule_runtime[self.state.session_id] = runtime_state
+            self.bind_working_memory(self.working_memory)
         elif clear_runtime_workspaces and hasattr(self.working_memory, "clear_runtime_workspaces"):
             self.working_memory.clear_runtime_workspaces(
                 keep_memory_workspace=True,
@@ -657,15 +856,30 @@ class SchedulerNew:
             return None
         return dict(self.state.outputs[-1])
 
+
+
+
     def pop_latest_output(self) -> dict[str, Any] | None:
         if not self.state.outputs:
             return None
         return dict(self.state.outputs.pop())
 
     def run(self) -> SchedulerNewState:
+        self.state.pending_operations.extend(self.rule_runtime.ready_operations())
+        if self.state.status == "waiting_activation":
+            if not self.state.pending_operations:
+                return self.state
+            self.state.status = "running"
+            self.state.phase = "controller"
         if self.state.status in {"idle", "waiting_controller"}:
             self.state.status = "running"
         while self.state.status == "running" and self.state.loop_index < self.state.max_loops:
+            if (not self.state.pending_inputs and not self.state.pending_operations and not self.state.pending_rule_ids
+                    and not self.state.pending_rule_selectors and not self.state.pending_frontend_patches
+                    and self.rule_runtime.has_waiting()):
+                self.state.status = "waiting_activation"
+                self.state.blocking_reason = "rule_activation_wait"
+                break
             self.state.loop_index += 1
             if self.state.phase == "controller":
                 self._run_controller()
@@ -980,6 +1194,14 @@ class SchedulerNew:
                 self.state.pending_rule_ids.extend([str(value) for value in item.get("rule_ids", []) or []])
                 self.state.pending_rule_selectors.extend(_rule_selectors_from_run_rule_operation(item))
             elif operation == "match":
+                unresolved = self._prepare_activation_candidates([item])
+                if unresolved:
+                    request = self._request_activation_control(unresolved)
+                    self.state.pending_rule_selectors.extend(request["pending_rule_selectors"])
+                if item.get("candidate_rule_paths"):
+                    request = self._request_control_candidate_path_selection(candidate_rule_paths=item["candidate_rule_paths"],
+                        matcher_result={}, rule_selector=item.get("selector_context", {}))
+                    self.state.pending_rule_selectors.extend(request["pending_rule_selectors"])
                 matched_rules = [
                     value for value in item.get("matched_rules", []) or []
                     if isinstance(value, dict)
@@ -991,16 +1213,7 @@ class SchedulerNew:
                 ]
                 self.state.active_rule_ids = list(dict.fromkeys([*self.state.active_rule_ids, *rule_ids]))
                 if matched_rules:
-                    executor_result = execute_rule_chain(
-                        calculator=self.calculator,
-                        matched_rules=matched_rules,
-                        working_memory=self.working_memory,
-                        session_id=self.state.session_id,
-                        chain_id=str(item.get("chain_id") or "") or None,
-                        source_match=item,
-                        control_context=self._current_control_context(),
-                        max_steps=self.state.max_rule_chain_steps,
-                    )
+                    executor_result = self._execute_rule_chain(matched_rules=matched_rules, chain_id=str(item.get('chain_id') or '') or None, source_match=item, max_steps=self.state.max_rule_chain_steps)
                     self._apply_executor_result(executor_result)
                 else:
                     self.state.pending_rule_ids.extend(rule_ids)
@@ -1055,6 +1268,13 @@ class SchedulerNew:
                 self._execute_workspace_memory_retrieval_operation(item)
             elif operation in {"retrieve_knowledge", "query_knowledge", "enrich_knowledge"}:
                 self._execute_knowledge_retrieval_operation(item)
+            elif operation == "inspect_goal_requirements":
+                self._execute_goal_requirement_inspection(item)
+            elif operation == "ground_input_semantics":
+                self._execute_input_semantics_operation(item)
+            elif operation in {"review_event_evidence", "inspect_rule_frontier",
+                    "inspect_require_gaps", "bind_knowledge_context"}:
+                self._execute_evidence_operation(item)
             elif operation == "mark_context_used":
                 context_ids = [str(value) for value in item.get("context_ids", []) if str(value)]
                 for event_id in item.get("event_ids", []) or self.state.active_event_ids:
@@ -1075,6 +1295,109 @@ class SchedulerNew:
                 self._append_output(dict(item), source="produced_operation")
             elif operation:
                 self.state.pending_operations.append(dict(item))
+
+    def _execute_evidence_operation(self, operation: dict[str, Any]) -> None:
+        owner_id = str(operation.get('rule_id') or '')
+        owners = _load_rule_records_by_ids(self._rule_db_path(), [owner_id])
+        def declares(value):
+            if isinstance(value, dict):
+                return (value.get('operation') == operation['operation'] and value.get('policy') == operation.get('policy')) or any(declares(v) for v in value.values())
+            return isinstance(value, list) and any(declares(v) for v in value)
+        if not owners or owners[0].get('rule_layer') != 'control' or not declares(owners[0].get('produced', [])):
+            raise ValueError('Evidence operations require an exact declaring Control owner and policy')
+        from .evidence_lifecycle import review_event_evidence, inspect_rule_frontier
+        if operation['operation'] == 'bind_knowledge_context':
+            from .require_gaps import bind_knowledge_context
+            from .persistence.knowledge_db import load_knowledge_records
+            records = load_knowledge_records(self.state.db_paths['knowledge'], knowledge_ids=[operation['policy']['knowledge_id']])
+            if len(records) != 1:
+                raise ValueError('Context repair requires an existing Knowledge record')
+            report = bind_knowledge_context(self.working_memory, self.state.active_event_ids, records[0], control_rule_id=owner_id)
+            key = 'context_binding'
+        elif operation['operation'] == 'inspect_require_gaps':
+            from .require_gaps import inspect_require_gaps
+            from .persistence.rule_db import load_rule_records
+            if operation.get('policy') != {'max_attempts_per_evidence': 1}:
+                raise ValueError('Unsupported Require recovery budget')
+            trigger = self._current_control_context().get('trigger', {})
+            target_ids = trigger.get('pending_rule_ids', []) if trigger.get('kind') == 'runtime_failure' else []
+            if not target_ids:
+                target_ids = self.state.control_state.get('require_repair_targets', [])
+            source = '\n'.join(str(self.working_memory.get_event_workspace(eid).get('metadata', {}).get('source_text', '')) for eid in self.state.active_event_ids).strip()
+            attempts = self.rule_runtime.state.setdefault('require_recovery_attempts', {})
+            report = inspect_require_gaps(load_rule_records(self._rule_db_path(), limit=None),
+                self.working_memory, self.state.active_event_ids, target_ids=target_ids,
+                source_text=source, attempts=attempts)
+            if report['kind'] in {'reextract', 'missing_relation', 'derivation'}:
+                attempts[report['gap_id']] = attempts.get(report['gap_id'], 0) + 1
+            if report['kind'] != 'none':
+                self.rule_runtime.state.setdefault('require_requests', {})[report['gap_id']] = {
+                    'report': deepcopy(report), 'event_graphs': deepcopy(self.working_memory.event_workspaces)}
+            if report['kind'] in {'missing_relation', 'derivation', 'reextract'}:
+                self.state.control_state['require_repair_targets'] = list(target_ids)
+            elif report.get('executable_alternative'):
+                report['resume_rule_ids'] = [report['executable_alternative']]
+                self.state.control_state.pop('require_repair_targets', None)
+            key = 'require_gaps'
+        elif operation['operation'] == 'review_event_evidence':
+            report = review_event_evidence(self.working_memory, self.state.active_event_ids,
+                                          control_rule_id=owner_id, policy=operation['policy'])
+            key = 'evidence_review'
+        else:
+            from .persistence.rule_db import load_rule_records
+            report = inspect_rule_frontier(load_rule_records(self._rule_db_path(), limit=None),
+                self.working_memory, self.state.active_event_ids, max_rules=int(operation['policy']['max_rules']))
+            key = 'rule_frontier'
+        self.state.control_state[key] = {**report, 'inspected_by_control_rule_id': owner_id}
+        self._remember(zone='event_workspace', stage='control_' + key, source=owner_id,
+                       payload_type=key, payload=report)
+
+    def _prepare_control_decision(self, operation: dict[str, Any]) -> dict[str, Any]:
+        if operation.get('operation') not in {'review_event_evidence', 'inspect_rule_frontier', 'inspect_require_gaps', 'bind_knowledge_context'}:
+            raise ValueError('Unsupported synchronous Control preparation operation')
+        self._execute_evidence_operation(operation)
+        return self._current_control_context()
+
+    def _execute_input_semantics_operation(self, operation: dict[str, Any]) -> None:
+        owner_id = str(operation.get("rule_id") or "")
+        owners = _load_rule_records_by_ids(self._rule_db_path(), [owner_id])
+        def declares(value):
+            if isinstance(value, dict):
+                return (value.get("operation") == "ground_input_semantics" and value.get("policy") == operation.get("policy")) or any(declares(v) for v in value.values())
+            return isinstance(value, list) and any(declares(v) for v in value)
+        if not owners or owners[0].get("rule_layer") != "control" or not declares(owners[0].get("produced", [])):
+            raise ValueError("Input semantic recognition must be declared by its owning Control rule")
+        from .input_semantics import ground_input_semantics
+        result = ground_input_semantics(self.working_memory, self.state.db_paths["knowledge"], self.vector_encoder,
+            control_rule_id=owner_id, policy=operation["policy"])
+        self._remember(zone="event_workspace", stage="control_input_semantics", source=owner_id,
+            payload_type="input_semantic_recognition", payload=result)
+
+    def _execute_goal_requirement_inspection(self, operation: dict[str, Any]) -> None:
+        """Run a Control-requested read-only inspection; Rules own the verdict."""
+        owner_id = str(operation.get("rule_id") or "")
+        owners = _load_rule_records_by_ids(self._rule_db_path(), [owner_id])
+        if not owners or owners[0].get("rule_layer") != "control":
+            raise ValueError("inspect_goal_requirements requires an owning Control Rule")
+        def declares(value: Any) -> bool:
+            if isinstance(value, dict):
+                return value.get("operation") == "inspect_goal_requirements" or any(declares(v) for v in value.values())
+            return isinstance(value, list) and any(declares(v) for v in value)
+        if not declares(owners[0].get("produced", [])):
+            raise ValueError("Owning Control Rule has not declared requirement inspection")
+        from .goal_requirements import inspect_goal_requirements
+        from .persistence.rule_db import load_rule_records
+        report = inspect_goal_requirements(
+            load_rule_records(self._rule_db_path(), limit=None), self.working_memory,
+            list(self.state.active_event_ids),
+            max_depth=int(operation["policy"]["max_depth"]),
+            max_nodes=int(operation["policy"]["max_nodes"]),
+        )
+        self.state.control_state["goal_requirements"] = {**report, "inspected_by_control_rule_id": owner_id}
+        self._remember(zone="event_workspace", stage="goal_requirement_inspection",
+                       source=owner_id, payload_type="requirement_proof",
+                       payload={"report": self.state.control_state["goal_requirements"]},
+                       tags=["scheduler-new", "control-requested-inspection"])
 
     def _apply_executor_result(self, result: dict[str, Any]) -> None:
         self._apply_control_updates(result)
@@ -1188,6 +1511,12 @@ class SchedulerNew:
 
     def _append_output(self, output: dict[str, Any], *, source: str) -> None:
         gated = self._apply_output_gate_decision(output)
+        if (gated is not None and gated.get("task_result", {}).get("status") == "solved"
+                and any(s.get("execution_scope") == "partial" for s in gated.get("result_spans", []))):
+            self.state.errors.append({"phase": "output", "error_code": "partial_result_cannot_complete",
+                                      "error": "Control attempted to report a partial result as a complete task"})
+            gated = {"operation": "stop_path", "status": "partial_result_cannot_complete",
+                     "task_result": {"status": "failed", "reason": "partial result requires an explicit partial task outcome"}}
         if gated is None:
             candidate = _prepare_output_candidate(output)
             self.state.pending_output_candidates.append(candidate)
@@ -1986,7 +2315,13 @@ class SchedulerNew:
                 target_rule_layer,
             ],
         )
-        if attempt_count >= max_attempts:
+        # Give Control the first failure so it may change inputs or method.
+        # A repeated, unchanged arithmetic failure is already known; asking
+        # the same recovery loop again cannot make progress.
+        retry_suppressed = bool(executor_results) and all(any(
+            step.get("result", {}).get("details", {}).get("retry_suppressed") is True
+            for step in result.get("steps", [])) for result in executor_results)
+        if retry_suppressed or attempt_count >= max_attempts:
             return None
         self.state.match_recovery_attempts[failure_key] = attempt_count + 1
         recovery_selector = normalize_rule_selector({
@@ -2184,6 +2519,11 @@ class SchedulerNew:
             }
         if state.get("pending_frontend_patches"):
             return {"next_phase": "frontend_patch", "reason": "frontend_patch_waiting", "control_voc": control_voc}
+        if state.get("last_action") == "frontend_patch" and self.state.control_state.get("require_repair_targets"):
+            review = self._request_control_review(
+                status="source_recheck_finished",
+                reason="Recheck the original Require after source refinement, including failed or empty refinement")
+            return {**review, "next_phase": "rule_match", "control_voc": control_voc}
         if state.get("pending_operations"):
             return {"next_phase": "execute", "reason": "operation_waiting", "control_voc": control_voc}
         if state.get("pending_rule_ids"):
@@ -2208,6 +2548,34 @@ class SchedulerNew:
                 "control_voc": control_voc,
             }
         return {"next_phase": "rule_match", "reason": "default_controller_continue_rule_match", "control_voc": control_voc}
+
+    def _default_event_builder(self, state: dict[str, Any], memory: WorkingMemoryState, payload: dict[str, Any]) -> dict[str, Any]:
+        """Activate only validated frontend workspaces delivered this round.
+
+        The frontend bridge owns construction. This stage references its graphs;
+        it does not invent facts, choose rules, or ignore a missing input graph.
+        """
+        event_ids = []
+        for incoming in _as_dict_list(payload.get("inputs")):
+            graph = (incoming.get("payload") or {}).get("frontend_state")
+            if not isinstance(graph, dict):
+                raise ValueError("Default event_build requires a frontend-ready graph")
+            contract = validate_event_graph_contract(graph)
+            if not contract["ok"]:
+                raise ValueError(f"Invalid delivered frontend graph: {contract['errors']}")
+            for event in graph["events"]:
+                event_id = str(event.get("event_id") or event.get("id") or "")
+                workspace = memory.event_workspaces.get(event_id)
+                if workspace is None:
+                    raise ValueError("Frontend workspace was not submitted: " + event_id)
+                known = {s.get("span_id") for s in _as_dict_list(workspace.get("spans"))}
+                if any(sid not in known for sid in event.get("evidence_span_ids", [])):
+                    raise ValueError("Delivered workspace evidence is missing: " + event_id)
+                if event_id not in event_ids:
+                    event_ids.append(event_id)
+        if not event_ids:
+            raise ValueError("No frontend workspace was delivered")
+        return {"phase": "event_build", "active_event_ids": event_ids, "status": "frontend_graph_ready"}
 
     def _default_stage(self, phase: str) -> StageFn:
         def run(state: dict[str, Any], memory: WorkingMemoryState, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2340,15 +2708,24 @@ class SchedulerNew:
         if not result.get("ok"):
             result["metadata"]["knowledge_expansion_requests"] = build_missing_knowledge_queries(result)
         produced = deepcopy(_as_dict_list(result.get("produced")))
+        activation_control = self._prepare_activation_candidates(produced)
+        if activation_control:
+            request = self._request_activation_control(activation_control)
+            request["pending_operations"] = [p for p in produced if p.get("matched_rules")]
+            request["matcher"] = result
+            return request
         if rule_selector:
             for item in produced:
                 if str(item.get("operation") or "") != "match":
                     continue
                 item["selector_context"] = _selector_context(rule_selector)
-                for match in _as_dict_list(item.get("matched_rules")):
+                item["matched_rules"] = _as_dict_list(item.get("matched_rules"))
+                for match in item["matched_rules"]:
                     match["selector_context"] = _selector_context(rule_selector)
-                for candidate_path in _as_dict_list(item.get("candidate_rule_paths")):
-                    for match in _as_dict_list(candidate_path.get("matched_rules")):
+                item["candidate_rule_paths"] = _as_dict_list(item.get("candidate_rule_paths"))
+                for candidate_path in item["candidate_rule_paths"]:
+                    candidate_path["matched_rules"] = _as_dict_list(candidate_path.get("matched_rules"))
+                    for match in candidate_path["matched_rules"]:
                         match["selector_context"] = _selector_context(rule_selector)
         if rule_selector.get("prefer_goal_reachability"):
             _annotate_goal_reachability(
@@ -2477,14 +2854,14 @@ class SchedulerNew:
                 completed = str(completion.get("status") or "").lower()
                 if outcome not in {"solved", "completed", "success", "passed"} and completed not in {"completed", "solved"}:
                     continue
-                trace = payload.get("execution_trace") if isinstance(payload.get("execution_trace"), dict) else {}
-                execution = trace.get("rule_trace") if isinstance(trace.get("rule_trace"), dict) else {}
+                trace = payload.get("auto_learning_trace") if isinstance(payload.get("auto_learning_trace"), dict) else {}
+                learning = trace.get("learning_trace") if isinstance(trace.get("learning_trace"), dict) else {}
                 graph = payload.get("event_hypergraph") if isinstance(payload.get("event_hypergraph"), dict) else {}
                 graph_metadata = graph.get("metadata") if isinstance(graph.get("metadata"), dict) else {}
-                graph_trace = graph_metadata.get("rule_trace") if isinstance(graph_metadata.get("rule_trace"), dict) else {}
+                graph_trace = graph_metadata.get("learning_trace") if isinstance(graph_metadata.get("learning_trace"), dict) else {}
                 for rule_id in (
-                    execution.get("productive_rule_ids", [])
-                    or execution.get("executed_rule_ids", [])
+                    learning.get("productive_rule_ids", [])
+                    or learning.get("executed_rule_ids", [])
                     or graph_trace.get("productive_rule_ids", [])
                     or graph_trace.get("executed_rule_ids", [])
                 ):
@@ -2641,8 +3018,41 @@ class SchedulerNew:
             if not suppress_stopped_paths:
                 outputs.extend(_as_dict_list(executor_result.get("stopped_paths")))
 
-        for operation in operations:
+        for operation_index, operation in enumerate(operations):
             operation_name = str(operation.get("operation") or operation.get("op") or "").strip()
+            if operation_name == "request_rule_activation_control":
+                request = self._request_activation_control(operation["candidates"])
+                return {**request, "pending_operations": operations[operation_index + 1:], "executor_results": executor_results}
+            if operation_name == "resume_rule_composition":
+                frame = self.rule_runtime.state.get("frames", {}).get(operation.get("frame_id"))
+                if not frame or frame["parent_frame_id"] is not None:
+                    raise ActivationError("invalid_composition_resume", str(operation.get("frame_id")))
+                executor_result = self._execute_rule_chain(matched_rules=[frame['item']], max_steps=frame['budget']['limit'])
+                collect_executor_result(executor_result)
+                consumed_operations.append({"operation": operation_name, "status": executor_result["status"]})
+                continue
+            if operation_name == "decide_rule_activation":
+                resolved = self._resolve_rule_activation(operation)
+                if resolved["operation"] == "activation_control_reject":
+                    outputs.append({**resolved, "operation": "stop_path", "status": "rule_activation_rejected"})
+                elif resolved["operation"] != "activation_control_wait":
+                    if resolved["operation"] == "run_rule":
+                        pending_rule_ids.extend(resolved["rule_ids"])
+                    else:
+                        pending_operations.append(resolved)
+                consumed_operations.append({"operation": operation_name, "resolution": resolved["operation"]})
+                continue
+            if operation_name == "match":
+                unresolved = self._prepare_activation_candidates([operation])
+                if unresolved:
+                    request = self._request_activation_control(unresolved)
+                    return {**request, "pending_operations": [p for p in [operation, *operations[operation_index + 1:]]
+                                                                 if p.get("operation") != "match" or p.get("matched_rules")],
+                            "executor_results": executor_results}
+                if operation.get("candidate_rule_paths"):
+                    request = self._request_control_candidate_path_selection(candidate_rule_paths=operation["candidate_rule_paths"],
+                        matcher_result={}, rule_selector=operation.get("selector_context", {}))
+                    return {**request, "pending_operations": operations[operation_index + 1:], "executor_results": executor_results}
             if operation_name == "execute_candidate_path":
                 candidate_path = (
                     operation.get("candidate_path")
@@ -2659,22 +3069,21 @@ class SchedulerNew:
                         }
                     )
                     continue
-                executor_result = execute_rule_chain(
-                    calculator=self.calculator,
-                    matched_rules=matched_rules,
-                    working_memory=memory,
-                    session_id=str(state.get("session_id") or self.state.session_id),
-                    source_match={
-                        "operation": "match",
-                        "candidate_path": candidate_path,
-                        "selected_by_control_rule_id": str(
-                            operation.get("selected_by_control_rule_id") or ""
-                        ),
-                    },
-                    control_context=self._current_control_context(),
-                    max_steps=self.state.max_rule_chain_steps,
-                )
-                collect_executor_result(executor_result)
+                executor_result = self._execute_rule_chain(matched_rules=matched_rules, source_match={'operation': 'match', 'candidate_path': candidate_path, 'selected_by_control_rule_id': str(operation.get('selected_by_control_rule_id') or '')}, max_steps=self.state.max_rule_chain_steps)
+                fallback_path = None
+                if (candidate_path.get('control_memory_preference_applied')
+                        and candidate_path.get('control_selection_policy', {}).get('memory_failure_fallback') == 'normal_candidates'
+                        and (not executor_result.get('ok') or executor_result.get('status') in {'stop_path', 'no_executable_rules'})):
+                    failed_ids = set(candidate_path.get('rule_ids', []))
+                    alternatives = [p for p in candidate_path.get('normal_fallback_candidates', [])
+                                    if not failed_ids.intersection(p.get('rule_ids', []))]
+                    fallback_path = choose_candidate_rule_path(alternatives, policy=candidate_path['control_selection_policy'],
+                                                               attempted_rule_ids=list(failed_ids))
+                    if fallback_path:
+                        pending_operations.append({'operation': 'execute_candidate_path', 'candidate_path': fallback_path,
+                                                   'selected_by_control_rule_id': operation.get('selected_by_control_rule_id'),
+                                                   'failed_memory_rule_ids': sorted(failed_ids)})
+                collect_executor_result(executor_result, suppress_stopped_paths=fallback_path is not None)
                 consumed_operations.append(
                     {
                         "operation": operation_name,
@@ -2692,6 +3101,11 @@ class SchedulerNew:
                     "retrieve_knowledge",
                     "query_knowledge",
                     "enrich_knowledge",
+                    "inspect_goal_requirements",
+                    "ground_input_semantics",
+                    "review_event_evidence",
+                    "inspect_rule_frontier",
+                    "inspect_require_gaps", "bind_knowledge_context",
                 }:
                     before_pending_count = len(self.state.pending_operations)
                     self._apply_produced_operations([operation])
@@ -2708,15 +3122,7 @@ class SchedulerNew:
             matched_rules = _as_dict_list(operation.get("matched_rules"))
             if not matched_rules:
                 continue
-            executor_result = execute_rule_chain(
-                calculator=self.calculator,
-                matched_rules=matched_rules,
-                working_memory=memory,
-                session_id=str(state.get("session_id") or self.state.session_id),
-                source_match=operation,
-                control_context=self._current_control_context(),
-                max_steps=self.state.max_rule_chain_steps,
-            )
+            executor_result = self._execute_rule_chain(matched_rules=matched_rules, source_match=operation, max_steps=self.state.max_rule_chain_steps)
             fallback_operation = _memory_path_fallback_operation(operation, executor_result)
             collect_executor_result(
                 executor_result,
@@ -2845,8 +3251,21 @@ class SchedulerNew:
         }
 
 
+
+
+
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+
+
+
+
+
+
 
 
 def _as_dict_list(value: Any) -> list[dict[str, Any]]:
@@ -3086,6 +3505,17 @@ def _runtime_failure_points(
         if not isinstance(result, dict):
             continue
         specific_executor_failure = False
+        for step in _as_dict_list(result.get("steps")):
+            computation = step.get("result", {})
+            details = computation.get("details", {})
+            if details.get("retry_without_input_change") is False:
+                points.append({"kind": "deterministic_computation_failure", "rule_id": step.get("rule_id"),
+                    "error_code": computation.get("error_code"),
+                    "original_error_code": details.get("original_error_code", computation.get("error_code")),
+                    "failure_id": details.get("failure_id"), "retry_suppressed": details.get("retry_suppressed", False),
+                    "retry_without_input_change": False,
+                    "suggested_control_action": "change_inputs_or_calculation_or_stop"})
+                specific_executor_failure = True
         for error in _as_dict_list(result.get("errors")):
             error_status = str(error.get("status") or "").strip()
             if error_status == "event_workspace_busy":
@@ -3118,6 +3548,10 @@ def _runtime_failure_points(
         if specific_executor_failure:
             continue
         if result.get("outputs") or result.get("next_rule_ids") or result.get("next_rule_selectors") or result.get("pending_operations"):
+            continue
+        steps = _as_dict_list(result.get('steps'))
+        if steps and all(s.get('status') == 'completed' and s.get('operation') in {'add', 'update', 'delete', 'merge', 'split'} for s in steps):
+            # An intermediate derivation is progress, not a failed final answer.
             continue
         rule_ids: list[str] = []
         for step in _as_dict_list(result.get("steps")):
@@ -3682,14 +4116,14 @@ def _control_select_matched_rules(
         matched = _as_dict_list(operation.get("matched_rules"))
         ranked = sorted(
             matched,
-            key=lambda item: _control_rule_execution_score(
+            key=lambda item: (_activation_selection_score(item, rule_selector), *_control_rule_execution_score(
                 item,
                 memory_preferred_rule_ids=memory_preferred_rule_ids,
                 prefer_memory_paths=rule_selector.get("memory_path_policy") == "prefer_then_fallback",
                 goal_feature_types=goal_feature_types,
                 prefer_goal_reachability=prefer_goal_reachability,
                 prefer_context_domain=prefer_context_domain,
-            ),
+            )),
             reverse=True,
         )
 
@@ -3750,6 +4184,16 @@ def _control_select_matched_rules(
         "execute_all_matches": execute_all,
         "execute_top_k": requested_top_k,
     }
+
+def _activation_selection_score(item: dict[str, Any], selector: dict[str, Any]) -> float:
+    signal = selector.get("activation_signal")
+    if not signal:
+        return 0.0
+    values = item.get("activation", {}).get("signals", {})
+    if signal not in values:
+        raise ActivationError("missing_selection_activation", str(signal))
+    return activation_number(values[signal]["value"], signal) * activation_number(selector.get("activation_weight", 1.0))
+
 
 def _control_rule_execution_score(
     match: dict[str, Any],
@@ -4117,12 +4561,13 @@ def _working_memory_goal_feature_types(memory: WorkingMemoryState) -> list[str]:
 
 
 def _working_memory_feature_types(memory: WorkingMemoryState) -> list[str]:
-    return list(dict.fromkeys(
-        str(span.get("feature_type") or "").strip()
-        for workspace in (memory.event_workspaces or {}).values()
-        for span in _as_dict_list(workspace.get("spans"))
-        if str(span.get("feature_type") or "").strip()
-    ))
+    from .evidence_lifecycle import evidence_validity
+    features = []
+    for workspace in memory.event_workspaces.values():
+        index = {s['span_id']: s for s in workspace.get('spans', [])}
+        validity = evidence_validity(index, workspace.get('relations', []))
+        features.extend(str(s['feature_type']) for sid, s in index.items() if validity[sid] and s.get('feature_type'))
+    return list(dict.fromkeys(features))
 
 
 def _memory_path_fallback_operation(
@@ -4164,6 +4609,14 @@ def _memory_path_fallback_operation(
             ],
         },
     }
+
+
+
+
+
+
+
+
 
 
 def _compact_matcher_metadata(metadata: Any) -> dict[str, Any]:

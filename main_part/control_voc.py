@@ -110,7 +110,7 @@ def _pending_work_count(state: dict[str, Any]) -> int:
 
 def _memory_evidence_count(memory: dict[str, Any]) -> int:
     count = 0
-    for zone in ("event_workspaces", "input_workspace", "memory_workspace"):
+    for zone in ("event_workspaces", "input_workspace", "auto_learn_workspace"):
         value = memory.get(zone)
         if isinstance(value, dict):
             count += len(value)

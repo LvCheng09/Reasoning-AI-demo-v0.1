@@ -1,6 +1,7 @@
 """Identity checks for derived semantic evidence."""
 import hashlib
 import json
+from .knowledge_schema_contract import field_value
 
 
 def fingerprint(span):
@@ -12,6 +13,9 @@ def alignment_is_current(span, spans, relations=None):
     if not proof:
         return True
     if span.get("_invalid_alignment"):
+        return False
+    source = spans.get(proof.get('source_span_id'))
+    if not source or any(field_value(span, field) != field_value(source, field) for field in proof.get('preserved_fields', ['value', 'unit', 'entity_id', 'period'])):
         return False
     if relations is not None and any(edge not in relations for edge in proof.get("source_relations", [])):
         return False

@@ -1306,13 +1306,13 @@ def _memory_index_payload(payload: Any) -> dict[str, Any]:
         return {}
     event_graph = payload.get("event_hypergraph") if isinstance(payload.get("event_hypergraph"), dict) else {}
     workspace = event_graph.get("workspace") if isinstance(event_graph.get("workspace"), dict) else {}
-    execution_trace = payload.get("execution_trace") if isinstance(payload.get("execution_trace"), dict) else {}
+    auto_trace = payload.get("auto_learning_trace") if isinstance(payload.get("auto_learning_trace"), dict) else {}
     metadata = event_graph.get("metadata") if isinstance(event_graph.get("metadata"), dict) else {}
-    rule_trace = (
-        execution_trace.get("rule_trace")
-        if isinstance(execution_trace.get("rule_trace"), dict)
-        else metadata.get("rule_trace")
-        if isinstance(metadata.get("rule_trace"), dict)
+    learning_trace = (
+        auto_trace.get("learning_trace")
+        if isinstance(auto_trace.get("learning_trace"), dict)
+        else metadata.get("learning_trace")
+        if isinstance(metadata.get("learning_trace"), dict)
         else {}
     )
     structural_observations = [
@@ -1364,24 +1364,24 @@ def _memory_index_payload(payload: Any) -> dict[str, Any]:
             "feedback": list(event_graph.get("feedback") or workspace.get("feedback") or [])[:32],
             "metadata": {
                 "final_goals": list(metadata.get("final_goals") or [])[:32],
-                "rule_trace": {
-                    "matched_rule_ids": list(rule_trace.get("matched_rule_ids") or [])[:128],
-                    "executed_rule_ids": list(rule_trace.get("executed_rule_ids") or [])[:128],
-                    "productive_rule_ids": list(rule_trace.get("productive_rule_ids") or [])[:128],
+                "learning_trace": {
+                    "matched_rule_ids": list(learning_trace.get("matched_rule_ids") or [])[:128],
+                    "executed_rule_ids": list(learning_trace.get("executed_rule_ids") or [])[:128],
+                    "productive_rule_ids": list(learning_trace.get("productive_rule_ids") or [])[:128],
                 },
                 "feedback_signal": metadata.get("feedback_signal", ""),
                 "structural_residual_observations": structural_observations,
             },
         },
-        "execution_trace": {
-            "outcome_status": execution_trace.get("outcome_status", payload.get("outcome_status", "")),
-            "feedback_signal": execution_trace.get("feedback_signal", ""),
-            "failure_points": list(execution_trace.get("failure_points") or payload.get("failure_points") or [])[:32],
-            "feedback": list(execution_trace.get("feedback") or [])[:32],
-            "rule_trace": {
-                "matched_rule_ids": list(rule_trace.get("matched_rule_ids") or [])[:128],
-                "executed_rule_ids": list(rule_trace.get("executed_rule_ids") or [])[:128],
-                "productive_rule_ids": list(rule_trace.get("productive_rule_ids") or [])[:128],
+        "auto_learning_trace": {
+            "outcome_status": auto_trace.get("outcome_status", payload.get("outcome_status", "")),
+            "feedback_signal": auto_trace.get("feedback_signal", ""),
+            "failure_points": list(auto_trace.get("failure_points") or payload.get("failure_points") or [])[:32],
+            "feedback": list(auto_trace.get("feedback") or [])[:32],
+            "learning_trace": {
+                "matched_rule_ids": list(learning_trace.get("matched_rule_ids") or [])[:128],
+                "executed_rule_ids": list(learning_trace.get("executed_rule_ids") or [])[:128],
+                "productive_rule_ids": list(learning_trace.get("productive_rule_ids") or [])[:128],
             },
         },
         "rule_uses": list(payload.get("rule_uses") or payload.get("memory_rule_uses") or [])[:128],

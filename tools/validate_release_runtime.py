@@ -24,8 +24,10 @@ from semantic_frontend.examples import (
 
 
 def seed_hashes():
-    root = Path(__file__).resolve().parents[1] / "data/demo/db"
-    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob("*.sqlite")}
+    root = Path(__file__).resolve().parents[1]
+    seeds = [*(root / "data/demo/db").glob("*.sqlite"),
+             root / "data/demo_v2/seed.json.gz", root / "data/demo_v2/manifest.json"]
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in seeds}
 
 
 def main() -> int:

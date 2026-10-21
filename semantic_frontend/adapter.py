@@ -59,6 +59,7 @@ def runtime_graph(graph):
     if events:
         # Retained by the backend workspace, including after frontend patches.
         events[0]["metadata"]["frontend_document"] = document
+        events[0]["metadata"]["source_text"] = graph.raw_text
     return {"spans": spans, "events": events}
 
 
@@ -77,14 +78,37 @@ class SemanticFrontendAdapter:
                          if e.get("metadata", {}).get("frontend_document")), None)
         if document is None:
             raise ValueError("frontend patch requires its original versioned document")
-        needs = [{k: deepcopy(p[k]) for k in ("target_span_id", "target_event_id", "event_id",
-                  "missing_span_query", "required_fields", "missing", "target_semantics", "patch_scope") if k in p}
-                 for p in patches]
+        needs = []
+        for patch in patches:
+            need = {k: deepcopy(patch[k]) for k in ("target_span_id", "target_event_id", "event_id",
+                "missing_span_query", "required_fields", "missing", "target_semantics", "patch_scope") if k in patch}
+            # A question is a search request, never evidence or an expected answer.
+            if patch.get("question"):
+                need.setdefault("missing_span_query", patch["question"])
+            if not any(need.get(k) for k in ("target_span_id", "target_event_id", "event_id")):
+                if not need.get("missing_span_query"):
+                    raise ValueError("Source recovery requires a target or a concrete question")
+                need["patch_scope"] = "document"
+            needs.append(need)
         result = self._translate("refine", {"contract_version": CONTRACT_VERSION,
             "text": game_input["input"], "document": document, "patches": needs})["event_graph"]
         old_spans = {s["span_id"]: s for s in current_event_graph.get("spans", [])}
         for index, span in enumerate(result["spans"]):
             old = old_spans.get(span["span_id"], {})
+            conflicts = [field for field in ("value", "unit", "polarity")
+                if old.get(field) not in (None, "") and span.get(field) not in (None, "")
+                and old[field] != span[field]]
+            if conflicts:
+                preserved = deepcopy(old)
+                evidence = {"source": "frontend_source_refinement", "target_span_id": span["span_id"],
+                    "fields": conflicts, "existing": {k: old[k] for k in conflicts},
+                    "candidate": {k: span[k] for k in conflicts},
+                    "source_span": span.get("metadata", {}).get("source_span")}
+                retained = preserved.setdefault("metadata", {}).setdefault("require_conflicts", [])
+                if evidence not in retained:
+                    retained.append(evidence)
+                result["spans"][index] = preserved
+                continue
             if old.get("metadata", {}).get("semantic_event") == span["metadata"]["semantic_event"]:
                 result["spans"][index] = deepcopy(old)
         # The LLM only sees source data. Preserve backend additions in the returned
@@ -129,6 +153,18 @@ class SemanticFrontendAdapter:
             for patch in patches:
                 if not isinstance(patch, dict):
                     raise ValueError("patch must be an object")
+                if patch.get("patch_scope") == "document":
+                    if not patch.get("missing_span_query"):
+                        raise ValueError("Document recovery requires a concrete question")
+                    # Snapshot roots before refinement adds children. All original
+                    # source roots are eligible; no arbitrary first-root fallback.
+                    roots = [e.id for e in graph.events if not e.parent_id]
+                    if not roots:
+                        unresolved.append({"reason": "target_not_identified", "request": patch})
+                    for root in roots:
+                        graph = self.frontend.refine(graph, root, {**patch, "target_span_id": root})
+                        unresolved.extend(graph.validation.get("unresolved", []))
+                    continue
                 target = patch.get("target_span_id") or patch.get("target_event_id") or patch.get("event_id")
                 if not graph.event_by_id(target):
                     roots = [e for e in graph.events if e.mainline_id == target and not e.parent_id]

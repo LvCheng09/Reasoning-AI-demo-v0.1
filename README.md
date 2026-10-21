@@ -191,9 +191,9 @@ JSON 报告包含 `execution_outcome`、`task_result`、前端和派生 spans、
 <details>
 <summary><strong>数据库隔离与运行文件</strong></summary>
 
-`data/demo/db/knowledge.sqlite` 保存 core–relation–nature 知识网络，`data/demo/db/rule.sqlite` 保存 Rule 网络。
+`data/demo_v2/seed.json.gz` 保存当前发布的 core–relation–nature 知识网络和 Rule 网络：210 条推理 Rule、106 条 Knowledge；`manifest.json` 记录数量与校验和。保留原发布的业务规则范围，更新执行契约并增加通用 Control Rule。
 
-二者是发布种子。Demo 和默认 Python 入口先创建 `runtime/inference_*` 独立可写副本；检索计数、索引和运行 Memory 只写副本。历史 Memory 不随包发布，演示也不执行学习。
+Demo 和默认 Python 入口先校验种子，再恢复到 `runtime/inference_*` 独立可写 SQLite 库；检索计数、索引和运行 Memory 只写运行库。历史 Memory 不随包发布，演示也不执行学习。`data/demo/db/` 中的旧种子仅供显式回归检查，不是默认运行入口。
 
 若设置 `MAIN_PART_DB_DIR`，它必须指向已有的可写运行库，不能指向发布种子。显式 `db_paths` 同样禁止指向种子库，包括符号链接和硬链接。图输入不需要 API 配置，但仍需满足图与向量契约。
 

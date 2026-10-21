@@ -19,7 +19,10 @@ def test_default_db_paths_use_isolated_released_databases(monkeypatch, tmp_path)
     paths = _default_db_paths()
     assert all(Path(value).parent.parent == tmp_path for value in paths.values())
     assert Path(paths["rule"]).is_file() and Path(paths["knowledge"]).is_file()
-    assert not Path(paths["memory"]).exists()  # Created only when the runtime needs it.
+    # Portable restoration initializes a fresh, empty Memory database.
+    import sqlite3
+    with sqlite3.connect(paths["memory"]) as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
 
 
 def test_default_db_paths_allow_isolated_runtime_override(monkeypatch, tmp_path):

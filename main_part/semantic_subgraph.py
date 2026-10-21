@@ -46,6 +46,11 @@ def normalize_semantic_relations(span: Mapping[str, Any]) -> list[dict[str, Any]
             raise ValueError(f"semantic_relations[{index}] must be an object")
         debug = item.get("debug") if isinstance(item.get("debug"), Mapping) else {}
         relation = {"debug": {field: str(debug.get(field) or item.get(field) or "").strip() for field in TRIPLE_TEXT_FIELDS}}
+        for key in ("semantic_concept", "concept_vector", "polarity"):
+            if key in item:
+                relation[key] = item[key]
+        if relation.get("polarity", "positive") not in {"positive", "negative", "unknown"}:
+            raise ValueError("Invalid semantic relation polarity")
         if not all(relation["debug"].values()):
             raise ValueError(f"semantic_relations[{index}] requires core/relation/nature debug labels")
         for field in TRIPLE_VECTOR_FIELDS:
@@ -68,9 +73,9 @@ def normalize_semantic_relations(span: Mapping[str, Any]) -> list[dict[str, Any]
                 "relation_node_id": vector_node_id(relation["relation_vector"], embedding_model=model, vector_version=version),
                 "nature_node_id": vector_node_id(relation["nature_vector"], embedding_model=model, vector_version=version),
             })
-            key = (relation["core_node_id"], relation["relation_node_id"], relation["nature_node_id"])
+            key = (relation["core_node_id"], relation["relation_node_id"], relation["nature_node_id"], relation.get("polarity", "positive"))
         else:
-            key = tuple(relation["debug"].values())
+            key = (*relation["debug"].values(), relation.get("polarity", "positive"))
         if key in seen:
             continue
         seen.add(key)
@@ -95,6 +100,8 @@ def has_required_subgraph(span: Mapping[str, Any], required_components: Sequence
             return False, []
         matched = None
         for candidate in available:
+            if candidate.get("polarity", "positive") != "positive":
+                continue
             if candidate.get("embedding_model") != model or candidate.get("vector_version") != version:
                 continue
             scores = {field: rescale_cosine_strict(candidate[field], vectors[field]) for field in TRIPLE_VECTOR_FIELDS}

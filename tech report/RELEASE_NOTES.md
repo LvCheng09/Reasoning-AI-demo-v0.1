@@ -1,5 +1,12 @@
 # v0.1 Release Notes
 
+## 2026-10-21 inference model update
+
+- Updated the inference pipeline with explicit activation contracts, execution selection, evidence lifecycle checks, and Require recovery.
+- Preserved frontend span fields at the working-memory boundary and connected source refinement to the launcher.
+- Default inference restores a checksum-verified portable seed: 210 inference Rules and 106 Knowledge records. The previous business inventory is preserved; unrelated new financial-analysis Rules, learning Rules and personal Memory are excluded.
+- Added contract and regression tests. Experiment reports, run artifacts, API credentials, model weights and learning implementation are not distributed.
+
 ## 2026-10-14 documentation alignment
 
 The Chinese and English tech reports now connect ERS theory to actual

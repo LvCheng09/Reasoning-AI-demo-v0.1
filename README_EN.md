@@ -191,9 +191,9 @@ Numeric results with units may use the same fixed model for wording. Request fai
 <details>
 <summary><strong>Database isolation and runtime files</strong></summary>
 
-`data/demo/db/knowledge.sqlite` holds the core–relation–nature Knowledge network; `data/demo/db/rule.sqlite` holds the Rule network.
+`data/demo_v2/seed.json.gz` holds the released core–relation–nature Knowledge and Rule networks: 210 inference Rules and 106 Knowledge records. `manifest.json` records counts and a checksum. The previous business Rule inventory is retained, with updated execution contracts and additional generic Control Rules.
 
-These are release seeds. The demo and default Python entry create independent writable copies under `runtime/inference_*`; retrieval counters, indexes, and runtime Memory are written only to those copies. Historical Memory is not shipped, and demo runs do not perform learning.
+The demo and default Python entry verify the portable seed and restore independent writable SQLite databases under `runtime/inference_*`; retrieval counters, indexes, and runtime Memory are written only to those databases. Historical Memory is not shipped, and demo runs do not perform learning. Older seeds under `data/demo/db/` remain explicit regression fixtures, not the default runtime entry.
 
 `MAIN_PART_DB_DIR`, if set, must point to existing writable runtime databases, never the released seeds. Explicit `db_paths` also reject seed paths, including symlinks and hardlinks. Graph input requires no API configuration, but must satisfy graph and vector contracts.
 

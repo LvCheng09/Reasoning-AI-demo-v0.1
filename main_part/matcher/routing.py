@@ -78,13 +78,17 @@ def graph_bundle_from_spec(spec: dict[str, Any], state: Any, working_memory: Wor
 
 
 def required_bundle_from_spec(spec: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
-    return {
+    bundle = {
         "kind": "required",
         "spec": spec,
         "rule_id": str(spec.get("rule_id") or args.get("rule_id") or ""),
         "rule_layer": str(spec.get("rule_layer") or args.get("rule_layer") or ""),
         "required": as_dict_list(spec.get("required") if spec.get("required") is not None else args.get("required")),
     }
+    from ..rule_execution_contract import CONTRACT_FIELDS
+    if "execution_contract_version" in spec or any(spec.get(k) for k in CONTRACT_FIELDS[1:]):
+        bundle["execution_rule"] = spec
+    return bundle
 
 
 def required_bundle_from_rule(rule: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
@@ -94,6 +98,7 @@ def required_bundle_from_rule(rule: dict[str, Any], spec: dict[str, Any]) -> dic
         "rule_id": str(rule.get("rule_id") or ""),
         "rule_layer": str(rule.get("rule_layer") or ""),
         "required": [dict(required) for required in as_dict_list(rule.get("required"))],
+        "execution_rule": rule,
     }
 
 
@@ -487,7 +492,7 @@ def rule_is_executable_candidate(rule: dict[str, Any], selector: Any = None) -> 
         return False
     if not _rule_satisfies_runtime_activation(rule, selector):
         return False
-    if _candidate_rule_blocked(rule, selector):
+    if _auto_generated_learning_candidate_blocked(rule, selector):
         return False
     status = str(
         rule.get("status")
@@ -584,10 +589,19 @@ def _selector_tag_values(value: Any) -> set[str]:
     }
 
 
-def _candidate_rule_blocked(rule: dict[str, Any], selector: Any = None) -> bool:
-    """Keep unpromoted candidate Rules out of ordinary inference."""
+def _auto_generated_learning_candidate_blocked(rule: dict[str, Any], selector: Any = None) -> bool:
+    """Keep learning samples out of normal reasoning until explicitly promoted."""
 
     selector_map = selector if isinstance(selector, dict) else {}
+    rid = str(rule.get("rule_id") or "").strip()
+    layer = str(rule.get("rule_layer") or "").strip().lower()
+    kind = str(rule.get("rule_kind") or "").strip().lower()
+    target_layer = str(selector_map.get("target_rule_layer") or "").strip().lower()
+    tags = {
+        str(tag).strip().lower()
+        for tag in (rule.get("scope_tags") or rule.get("tags") or [])
+        if str(tag).strip()
+    }
     status = str(rule.get("status") or rule.get("revision_status") or "").strip().lower()
     promotion_status = str(
         rule.get("promotion_status")
@@ -599,11 +613,14 @@ def _candidate_rule_blocked(rule: dict[str, Any], selector: Any = None) -> bool:
 
     if promotion_status == "shadow" and not selector_map.get("isolated_shadow_evaluation"):
         return True
-    if selector_map.get("include_candidate_rules"):
+    if selector_map.get("include_learning_candidates") or selector_map.get("include_auto_generated_candidates"):
+        return False
+    if target_layer == "auto_learning" and layer == "auto_learning":
         return False
     if promotion_status in {"active", "validated", "verified", "promoted", "passed"} and status not in {"candidate", "instance_seed"}:
         return False
 
+    generated_id = rid.startswith("auto_family_") or rid.startswith("auto_path_supervision_")
     candidate_status = status in {
         "candidate",
         "candidates",
@@ -614,7 +631,22 @@ def _candidate_rule_blocked(rule: dict[str, Any], selector: Any = None) -> bool:
         "copy_ready",
         "draft",
     }
-    return candidate_status
+    if kind == "auto_learning_event" and layer == target_layer and not candidate_status:
+        return False
+
+    learning_sample = kind == "auto_learning_event" or bool(
+        tags.intersection(
+            {
+                "auto_learning",
+                "event_to_rule",
+                "path_supervision",
+                "instance_seed",
+                "causal_pattern_candidate",
+                "recurring_pattern_candidate",
+            }
+        )
+    )
+    return generated_id or learning_sample
 
 
 def rank_loaded_rule_candidates(rules: list[dict[str, Any]], selector: Any) -> list[dict[str, Any]]:
@@ -673,7 +705,7 @@ def iter_match_workspaces(
         normalized_event_id = str(event_id or workspace.get("event_id") or "")
         if selected and normalized_event_id not in selected:
             continue
-        if not include_feedback_events and _is_feedback_workspace(workspace):
+        if not include_feedback_events and _is_auto_learn_feedback_workspace(workspace):
             continue
         results.append(
             {
@@ -687,11 +719,14 @@ def iter_match_workspaces(
     return results
 
 
-def _is_feedback_workspace(workspace: dict[str, Any]) -> bool:
+def _is_auto_learn_feedback_workspace(workspace: dict[str, Any]) -> bool:
     metadata = workspace.get("metadata") if isinstance(workspace.get("metadata"), dict) else {}
     source = str(metadata.get("source") or workspace.get("source") or "").strip().lower()
     source_type = str(metadata.get("source_type") or workspace.get("source_type") or "").strip().lower()
+    learning_route = str(metadata.get("learning_route") or workspace.get("learning_route") or "").strip().lower()
     event_type = str(workspace.get("event_type") or "").strip().lower()
+    if learning_route == "auto_learn":
+        return True
     if source in {"runtime_feedback", "diagnostic_harness", "expert_feedback"}:
         return True
     if source_type in {"runtime_evaluation", "expert", "diagnostic_feedback", "authority_feedback"}:

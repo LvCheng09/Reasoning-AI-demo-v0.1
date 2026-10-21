@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 from .output_decoder import SemanticOutputDecoder
+from .evidence_lifecycle import evidence_validity
 
 
 @dataclass
@@ -111,8 +112,14 @@ def build_runtime_output_state(
                       if span.get("feature_type") in features and decoder._is_target_output_eligible(span)]
     if not target_ids:
         return rejected("no_approved_target")
+    validity = evidence_validity(spans_by_id, workspace.get("relations", []) or [])
+    if any(not validity.get(sid) or spans_by_id[sid].get("_invalid_derivation") for sid in target_ids):
+        return rejected("approved_target_has_stale_evidence")
     if any(not decoder._is_target_output_eligible(spans_by_id[sid]) for sid in target_ids):
         return rejected("approved_target_not_eligible")
+
+    spans_by_id = {sid: span for sid, span in spans_by_id.items()
+                   if validity.get(sid) and not span.get("_invalid_derivation")}
 
     state = {"event_graph": {"spans": list(spans_by_id.values()), "events": [{
         "event_id": event_id,

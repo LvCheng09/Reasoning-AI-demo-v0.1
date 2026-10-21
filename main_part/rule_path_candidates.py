@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
+from copy import deepcopy
 
 from .identity import stable_content_id
+from .rule_execution_contract import candidate_can_execute, is_typed_rule, span_output_items
+from .activation_semantics import ActivationError, number as activation_number
 
 
 def attach_candidate_rule_paths(
@@ -67,6 +70,9 @@ def rule_path_claims(
                 continue
             slot_id = str(condition.get("slot_id") or condition.get("span_id") or condition.get("id") or "").strip()
             span_id = str(bindings.get(slot_id) or "").strip()
+            evaluation = rule_match.get("require_evaluation")
+            if evaluation is not None and evaluation["bindings"].get(slot_id) != span_id:
+                continue
             if not event_id or not span_id:
                 continue
             claims.append(
@@ -94,6 +100,7 @@ def choose_candidate_rule_path(
     *,
     policy: dict[str, Any] | None = None,
     attempted_rule_ids: list[str] | None = None,
+    memory_preferred_rule_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Apply a Control rule's declared scoring policy to compatible paths."""
 
@@ -105,28 +112,42 @@ def choose_candidate_rule_path(
         "risk": -0.20,
         "claim_pressure": -0.05,
         "attempted_rule": -0.50,
+        "activation": 0.0,
     }
     supplied = (policy or {}).get("weights") if isinstance((policy or {}).get("weights"), dict) else {}
     for key in weights:
         if key in supplied:
             weights[key] = _number(supplied[key], weights[key])
     attempted = {str(value) for value in attempted_rule_ids or [] if str(value)}
-    ranked: list[tuple[float, str, dict[str, Any]]] = []
+    preferred = set(memory_preferred_rule_ids or [])
+    ranked = []
     for path in _dict_list(candidate_paths):
         features = path.get("selection_features") if isinstance(path.get("selection_features"), dict) else {}
         path_rule_ids = {str(value) for value in path.get("rule_ids", []) if str(value)}
+        matched = _dict_list(path.get('matched_rules'))
+        if not matched or not all(candidate_can_execute(m) for m in matched):
+            continue
+        if weights["activation"]:
+            signal = (policy or {}).get("activation_signal")
+            if not signal:
+                raise ActivationError("missing_path_activation_signal", "activation weight requires a named signal")
+            features = {**features, "activation": _average([
+                activation_number(m["activation"]["signals"][signal]["value"], signal) for m in matched])}
         score = sum(
             weights[name] * _number(features.get(name), 0.0)
-            for name in ("match_quality", "routing_quality", "confidence", "priority", "risk", "claim_pressure")
+            for name in ("match_quality", "routing_quality", "confidence", "priority", "risk", "claim_pressure", "activation")
         )
         if attempted.intersection(path_rule_ids):
             score += weights["attempted_rule"]
-        ranked.append((score, str(path.get("candidate_path_id") or ""), path))
+        ranked.append((bool(preferred.intersection(path_rule_ids)), score, str(path.get("candidate_path_id") or ""), path))
     if not ranked:
         return None
-    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = dict(ranked[0][2])
-    selected["control_selection_score"] = ranked[0][0]
+    ranked.sort(key=lambda item: item[:3], reverse=True)
+    selected = deepcopy(ranked[0][3])
+    selected["control_selection_score"] = ranked[0][1]
+    selected['control_memory_preference_applied'] = ranked[0][0]
+    selected['control_selection_policy'] = deepcopy(policy or {})
+    selected['normal_fallback_candidates'] = [deepcopy(item[3]) for item in ranked if not item[0]] if ranked[0][0] else []
     return selected
 
 
@@ -152,11 +173,25 @@ def _conflict_pairs(
                 reasons.append(f"exclusive_branch:{left_group}")
             if _claims_exceed_capacity(claims[left], claims[right]):
                 reasons.append("shared_consumable_or_capacity_claim")
-            if mutation_scopes[left].intersection(mutation_scopes[right]):
+            if mutation_scopes[left].intersection(mutation_scopes[right]) - _shared_fusion_writes(matched_rules[left], matched_rules[right]):
                 reasons.append("competing_graph_mutation")
             if reasons:
                 pairs[(left, right)] = reasons
     return pairs
+
+
+def _shared_fusion_writes(left: dict, right: dict) -> set[str]:
+    """Declared reducers may share their output; other graph writes conflict."""
+    def declarations(item):
+        rule = _rule(item)
+        q = item.get("resolved_q", rule.get("q_semantics", {}))
+        weights = {entry["target"]["span_id"]: (entry["group"], entry["normalization"])
+                   for entry in q.get("transform", []) if entry["type"] == "weight"}
+        return {f"{'write' if is_typed_rule(rule) else 'add'}:{p.get('event_id') or '*'}:span:{s['span_id']}": weights[s["span_id"]]
+                for p in rule.get("produced", []) if p.get("operation") in ({"add", "update"} if is_typed_rule(rule) else {"add"})
+                for s in (span_output_items(p) if is_typed_rule(rule) else p.get("conclusion", [])) if s.get("span_id") in weights}
+    a, b = declarations(left), declarations(right)
+    return {scope for scope in a.keys() & b.keys() if a[scope] == b[scope]}
 
 
 def _maximal_compatible_paths(
@@ -312,6 +347,12 @@ def _rule_mutation_scopes(rule_match: dict[str, Any]) -> set[str]:
         if operation not in {"add", "update", "delete", "merge", "split"}:
             continue
         event_id = str(produced.get("event_id") or "*").strip() or "*"
+        if is_typed_rule(rule) and produced.get("target", "spans") == "spans":
+            ids = [s["span_id"] for s in span_output_items(produced)]
+            if operation == "delete" and produced.get("id"):
+                ids.append(produced["id"])
+            scopes.update(f"write:{event_id}:span:{sid}" for sid in ids)
+            continue
         for key in (
             "target_span_id",
             "span_id",

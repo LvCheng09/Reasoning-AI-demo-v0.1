@@ -423,9 +423,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 def _payload(rule: Any) -> dict[str, Any]:
+    from ..rule_execution_contract import validate_rule_contract
     if hasattr(rule, "to_dict"):
-        return dict(rule.to_dict())
-    return dict(rule or {})
+        payload = dict(rule.to_dict())
+    else:
+        payload = dict(rule or {})
+    validate_rule_contract(payload)
+    return payload
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -714,6 +718,7 @@ def database_is_empty(db_path: str | Path) -> bool:
 _RULE_LAYER_VALUE_MIGRATIONS = {
     "common": "common_sense",
     "commonsense": "common_sense",
+    "auto_learn_policy": "auto_learning",
 }
 _RULE_LAYER_FIELDS = {"domain", "layer", "rule_layer", "target_rule_layer"}
 _RULE_LAYER_LIST_FIELDS = {"preferred_rule_tags", "scope_tags", "tags"}
@@ -905,6 +910,12 @@ def upsert_rule_records(
             payload_to_store.pop("vector", None)
             payload_to_store["required"] = [_clean_required_payload_item(item) for item in required_items]
             payload_to_store["produced"] = [_clean_produced_payload_item(item) for item in produced_items]
+            if payload.get("execution_contract_version") == 2:
+                # Child SQL tables are projections. Preserve the exact versioned
+                # executable contract; legacy normalization changes thresholds
+                # and injects fields, invalidating activation identities.
+                payload_to_store["required"] = payload.get("required", [])
+                payload_to_store["produced"] = payload.get("produced", [])
             payload_to_store["required_conditions"] = [_debug_text(item["condition"]) for item in required_items if _debug_text(item["condition"])]
             payload_to_store["required_relation_types"] = [item["relation"] for item in required_items if item["relation"]]
             payload_to_store["produced_conditions"] = [_debug_text(item["conclusion"]) for item in produced_items if _debug_text(item["conclusion"])]
@@ -1638,7 +1649,14 @@ def sync_rule_learning_evidence_stats(
     db_path: str | Path,
     updates: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Persist externally supplied evidence statistics without changing runtime counters."""
+    """Persist effective learning support without changing runtime counters.
+
+    Auto-Learn collapses correlated observations before this call. The supplied
+    support count is therefore an absolute effective-evidence count, not an
+    increment. Rule content upserts intentionally preserve all statistics, so
+    this separate interface is the only path that may synchronize learning
+    support after a content update.
+    """
 
     requested: dict[str, int] = {}
     for item in updates:

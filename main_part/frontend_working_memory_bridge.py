@@ -77,6 +77,18 @@ def submit_frontend_state_to_working_memory(
             event_payload["spans"] = list(spans_by_id.values())
             event_payload["evidence_span_ids"] = list(spans_by_id)
         event_payload.setdefault("metadata", {})
+        for identity_field in (
+            "correlation_group_id",
+            "source_template_id",
+            "template_id",
+            "evidence_provenance_id",
+            "source_record_id",
+            "source_document_id",
+            "source_episode_id",
+            "independence_verified",
+        ):
+            if identity_field in game_input and identity_field not in event_payload["metadata"]:
+                event_payload["metadata"][identity_field] = game_input[identity_field]
         event_payload["metadata"].update({"frontend_entry_id": entry.entry_id if entry else ""})
         event_payload["metadata"].setdefault(
             "initial_event_graph",
@@ -85,7 +97,10 @@ def submit_frontend_state_to_working_memory(
                 "relations": deepcopy(event_payload.get("relations", [])),
             },
         )
-        event_workspace = working_memory.upsert_event_hypergraph(EventHypergraph.from_mapping(event_payload), merge=True)
+        # Frontend spans are an extensible, already-validated data contract.
+        # Converting them through SpanUnit dropped scope, modality/polarity and
+        # new semantic identity vectors before the Scheduler could read them.
+        event_workspace = working_memory.upsert_event_hypergraph(event_payload, merge=True)
         working_memory.add(
             WorkingMemoryEntry(
                 entry_id=_entry_id(),

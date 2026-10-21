@@ -63,7 +63,7 @@ def _match(memory, rule):
     )
 
 
-def _schema_context(*, activation_mode="explicit_components", edge_role="evidence", core=CORE, relation=RELATION, nature=NATURE):
+def _schema_context(*, activation_mode="explicit_components", edge_role="evidence", core=CORE, relation=RELATION, nature=NATURE, component_role='subject'):
     return {"status": "active", "payload": {
         "knowledge_id": f"schema_{edge_role}", "retrieval_source": "knowledge_db",
         "knowledge_edge": {"edge_id": f"schema_{edge_role}", "core_vector": core, "relation_vector": relation,
@@ -71,6 +71,8 @@ def _schema_context(*, activation_mode="explicit_components", edge_role="evidenc
                            "vector_dimension": 2},
         "span_schema": {"schema_id": "knowledge_span_avg_ar_v1", "target_feature_type": "avg_ar",
                         "activation_mode": activation_mode, "edge_role": edge_role, "min_score": .99,
+                        'component_role':component_role,
+                        'binding_policy': {'equal_fields':['entity_id','period'],'require_fields':True,'support_scope':'same_event'},
                         "completion": {"core_vector": PROJECTED, "relation_vector": PROJECTED,
                                        "nature_vector": PROJECTED}},
     }}
@@ -132,11 +134,13 @@ def test_knowledge_all_cores_requires_every_declared_core():
     memory.event_workspaces["e"]["spans"].append({
         "span_id": "qualifier", "core_vector": PROJECTED,
         "embedding_model": MODEL, "vector_version": VERSION, "semantic_relations": [],
+        'entity_id':'entity_A','period':'2026Q3',
     })
     memory.event_workspaces["e"]["context_items"] = [
         _schema_context(activation_mode="all_cores", edge_role="activation_core", core=CORE),
-        _schema_context(activation_mode="all_cores", edge_role="activation_core", core=PROJECTED),
+        _schema_context(activation_mode="all_cores", edge_role="activation_core", core=PROJECTED, component_role='support'),
     ]
+    memory.event_workspaces['e']['spans'][0].update(entity_id='entity_A',period='2026Q3')
     result = align_event_spans(memory, _alignment_requirements(_match(memory, rule)), ["schema_activation_core"], control_rule_id="control")
     assert result["accepted"]
     derived = memory.event_workspaces["e"]["spans"][-1]
@@ -146,7 +150,7 @@ def test_knowledge_all_cores_requires_every_declared_core():
     incomplete, rule = _memory(), _rule()
     incomplete.event_workspaces["e"]["context_items"] = [
         _schema_context(activation_mode="all_cores", edge_role="activation_core", core=CORE),
-        _schema_context(activation_mode="all_cores", edge_role="activation_core", core=PROJECTED),
+        _schema_context(activation_mode="all_cores", edge_role="activation_core", core=PROJECTED, component_role='support'),
     ]
     rejected = align_event_spans(incomplete, _alignment_requirements(_match(incomplete, rule)), ["schema_activation_core"], control_rule_id="control")
     assert not rejected["accepted"]
@@ -174,6 +178,7 @@ def _relation_context_schema(schema_id, target_type, completion, edge_role, core
         "span_schema": {
             "schema_id": schema_id, "target_feature_type": target_type,
             "activation_mode": "relation_context", "edge_role": edge_role,
+            'binding_policy': {'equal_fields':['entity_id','period'],'require_fields':True,'support_scope':'same_span_or_linked'},
             "min_score": .99, "completion": {
                 "core_vector": completion, "relation_vector": completion, "nature_vector": completion,
             },

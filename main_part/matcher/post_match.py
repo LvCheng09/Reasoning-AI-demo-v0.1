@@ -110,6 +110,10 @@ def propose_temporary_rule_revision(
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Match post-match control rules and apply their temporary revisions."""
 
+    from ..rule_execution_contract import is_typed_rule
+    if is_typed_rule(rule):
+        raise ValueError("typed rules retain original Require; declare a versioned partial mode instead")
+
     explicit_operations = _as_dict_list(args.get("post_match_require_revisions"))
     applied_rule_ids: list[str] = []
     operations = list(explicit_operations)

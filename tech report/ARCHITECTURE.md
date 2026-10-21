@@ -56,8 +56,8 @@ Control Rule declarations are stored in the Rule library. Scheduler executes the
 
 | Data | Storage | Meaning |
 | --- | --- | --- |
-| Knowledge | Released `data/demo/db/knowledge.sqlite`; writable runtime copy | Common core–relation–nature definitions and span schemas |
-| Rules | Released `data/demo/db/rule.sqlite`; writable runtime copy | Reusable domain operations and Control policies |
+| Knowledge | Portable `data/demo_v2/seed.json.gz`; writable runtime SQLite | Common core–relation–nature definitions and span schemas |
+| Rules | Same portable seed; writable runtime SQLite | Reusable domain operations and Control policies |
 | Event state | `WorkingMemoryState.event_workspaces` | Current task facts, supported completions, derived results, relations |
 | Control state | `SchedulerNewState.control_state/control_context` | Active strategy and decision context |
 | Runtime Memory | Runtime workspace/database; no historical seed distributed | Case-specific context, paths, and outcomes |

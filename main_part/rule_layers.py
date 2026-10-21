@@ -6,6 +6,7 @@ from typing import Any
 
 
 ALLOWED_RULE_LAYERS = {
+    "auto_learning",
     "check_policy",
     "common_sense",
     "control",

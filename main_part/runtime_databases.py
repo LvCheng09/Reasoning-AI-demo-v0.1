@@ -30,6 +30,13 @@ def prepare_runtime_databases(
     *, seed_dir: Path | None = None, runtime_root: Path | None = None
 ) -> dict[str, str]:
     root = Path(__file__).resolve().parents[1]
+    portable = root / "data/demo_v2"
+    if seed_dir is None:
+        from .demo_seed import restore_demo_seed
+        destination_root = (runtime_root or root / "runtime").expanduser().resolve()
+        destination_root.mkdir(parents=True, exist_ok=True)
+        destination = Path(tempfile.mkdtemp(prefix="inference_", dir=destination_root))
+        return restore_demo_seed(portable, destination)
     seeds = (seed_dir or root / "data" / "demo" / "db").resolve()
     sources = {name: seeds / f"{name}.sqlite" for name in ("rule", "knowledge")}
     for path in sources.values():

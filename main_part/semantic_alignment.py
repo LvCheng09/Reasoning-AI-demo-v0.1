@@ -7,11 +7,13 @@ from .matcher.matching import structured_slot_match
 from .alignment_contract import fingerprint
 from .semantic_subgraph import has_required_subgraph, normalize_semantic_relations
 from .vector_contracts import canonical_embedding_model, coerce_vector, rescale_cosine_strict
+from .knowledge_schema_contract import validate_span_schema, field_value
 
 
 def is_fact(span):
     semantics = span.get("metadata", {}).get("semantic_event", {})
-    return (semantics.get("modality", span.get("modality", "fact")) == "fact"
+    return (span.get('span_role') not in {'goal', 'objective'}
+            and semantics.get("modality", span.get("modality", "fact")) == "fact"
             and semantics.get("polarity", span.get("polarity", "positive")) == "positive")
 
 
@@ -114,6 +116,7 @@ def _knowledge_span_schemas(workspace, knowledge_ids=None):
         edge = payload.get("knowledge_edge", {})
         if not schema or not edge:
             continue
+        validate_span_schema(schema)
         schema_id = str(schema.get("schema_id") or "").strip()
         target_type = str(schema.get("target_feature_type") or "").strip()
         if not schema_id or not target_type:
@@ -133,6 +136,7 @@ def _knowledge_span_schemas(workspace, knowledge_ids=None):
             "min_score": float(schema.get("min_score", 0.85)),
             "activation_mode": mode,
             "completion": completion,
+            "binding_policy": deepcopy(schema.get('binding_policy')),
             "evidence_components": [],
             "activation_components": [],
             "activation_relations": [],
@@ -142,13 +146,14 @@ def _knowledge_span_schemas(workspace, knowledge_ids=None):
         })
         if (group["target_type"] != target_type
                 or group["completion"] != completion
-                or group["activation_mode"] != mode):
+                or group["activation_mode"] != mode
+                or group['binding_policy'] != schema.get('binding_policy')):
             raise ValueError(f"inconsistent Knowledge span schema: {schema_id}")
         edge_role = str(schema.get("edge_role") or "evidence").strip()
         if edge_role == "evidence" and mode == "explicit_components":
             group["evidence_components"].append(dict(edge))
         elif edge_role == "activation_core" and mode in {"single_core", "all_cores"}:
-            group["activation_components"].append(dict(edge))
+            group["activation_components"].append({**edge, 'component_role': schema['component_role']})
         elif edge_role == "activation_relation" and mode == "relation_context":
             group["activation_relations"].append(dict(edge))
         elif edge_role == "context_core" and mode == "relation_context":
@@ -157,6 +162,13 @@ def _knowledge_span_schemas(workspace, knowledge_ids=None):
             raise ValueError(f"unsupported Knowledge schema edge role: {edge_role}")
         group["knowledge_ids"].append(payload["knowledge_id"])
         group["knowledge_edge_ids"].append(str(edge.get("edge_id") or payload["knowledge_id"]))
+    for group in schemas.values():
+        if group['activation_mode'] in {'single_core', 'all_cores'}:
+            subjects = [c for c in group['activation_components'] if c['component_role'] == 'subject']
+            if len(subjects) != 1:
+                raise ValueError('Core definition requires exactly one subject component')
+            if group['activation_mode'] == 'single_core' and len(group['activation_components']) != 1:
+                raise ValueError('Single-core definition cannot contain support components')
     return [
         value
         for value in schemas.values()
@@ -184,6 +196,8 @@ def _core_locations(workspace, component):
     """Find actual core nodes in the event, using vectors only."""
     locations = []
     for span in workspace.get("spans", []):
+        if not is_fact(span):
+            continue
         span_id = str(span.get("span_id") or "")
         score = _core_match(span.get("core_vector"), span.get("embedding_model"), span.get("vector_version"), component)
         if score is not None:
@@ -224,7 +238,21 @@ def _adjacent_span_ids(workspace, source_span_id):
     return adjacent
 
 
-def _activate_by_relation_context(workspace, source, relation_components, context_components):
+def _support_is_bound(workspace, source, support, policy):
+    if support.get('span_id') == source.get('span_id'):
+        return True
+    if policy['support_scope'] == 'same_span_or_linked' and support.get('span_id') not in _adjacent_span_ids(workspace, source.get('span_id')):
+        return False
+    for field in policy['equal_fields']:
+        left, right = field_value(source, field), field_value(support, field)
+        if policy['require_fields'] and (left is None or left == '' or right is None or right == ''):
+            return False
+        if left != right:
+            return False
+    return True
+
+
+def _activate_by_relation_context(workspace, source, relation_components, context_components, binding_policy):
     """Prove a sense from the source relation plus adjacent core evidence.
 
     The nature on the Event relation is deliberately ignored: it is the value
@@ -234,10 +262,7 @@ def _activate_by_relation_context(workspace, source, relation_components, contex
     """
     if not relation_components or not context_components:
         return False, []
-    try:
-        nested_relations = normalize_semantic_relations(source)
-    except ValueError:
-        return False, []
+    nested_relations = normalize_semantic_relations(source)
     # The span's primary core-relation-nature triple is part of the same local
     # semantic graph as semantic_relations.  Frontend documents keep that
     # primary triple at the span top level and only place additional context
@@ -272,6 +297,7 @@ def _activate_by_relation_context(workspace, source, relation_components, contex
         })
 
     adjacent_ids = _adjacent_span_ids(workspace, str(source.get("span_id") or ""))
+    span_by_id = {s['span_id']: s for s in workspace.get('spans', [])}
     used_locations = {(item["span_id"], item["relation_index"]) for item in evidence}
     for component in context_components:
         locations = [
@@ -279,6 +305,7 @@ def _activate_by_relation_context(workspace, source, relation_components, contex
             for item in _core_locations(workspace, component)
             if item["span_id"] in adjacent_ids
             and (item["span_id"], item["relation_index"]) not in used_locations
+            and _support_is_bound(workspace, source, span_by_id[item['span_id']], binding_policy)
         ]
         if not locations:
             return False, []
@@ -294,22 +321,27 @@ def _activate_by_relation_context(workspace, source, relation_components, contex
     return True, evidence
 
 
-def _activate_by_cores(workspace, source, components, mode):
-    """A single core activates alone; all_cores requires distinct event evidence."""
+def _activate_by_cores(workspace, source, components, mode, binding_policy):
+    """The declared subject owns identity/value; supports must be scope-bound."""
     if not components:
         return False, []
+    components = sorted(components, key=lambda c: (c['component_role'] != 'subject', str(c.get('edge_id', ''))))
+    span_by_id = {s['span_id']: s for s in workspace.get('spans', [])}
     evidence, used = [], set()
     for index, component in enumerate(components):
         locations = _core_locations(workspace, component)
-        if index == 0:
+        if component['component_role'] == 'subject':
             locations = [item for item in locations if item["span_id"] == source.get("span_id")]
+        else:
+            locations = [item for item in locations if _support_is_bound(workspace, source, span_by_id[item['span_id']], binding_policy)]
+        locations.sort(key=lambda item: (item['span_id'] != source['span_id'], item['span_id'], -1 if item['relation_index'] is None else item['relation_index']))
         location = next((item for item in locations if (item["span_id"], item["relation_index"]) not in used), None)
         if location is None:
             return False, []
         used.add((location["span_id"], location["relation_index"]))
         evidence.append({"knowledge_edge_id": str(component.get("edge_id") or component.get("knowledge_id") or ""),
                          "span_id": location["span_id"], "relation_index": location["relation_index"],
-                         "core_score": round(location["score"], 6)})
+                         "core_score": round(location["score"], 6), 'evidence_role': component['component_role']})
         if mode == "single_core":
             return True, evidence
     return True, evidence
@@ -351,13 +383,15 @@ def align_event_spans(memory, requirements, knowledge_ids, *, control_rule_id):
                         source,
                         policy["activation_relations"],
                         policy["context_components"],
+                        policy['binding_policy'],
                     )
                 else:
                     proven, component_evidence = _activate_by_cores(
-                        workspace, source, policy["activation_components"], policy["activation_mode"]
+                        workspace, source, policy["activation_components"], policy["activation_mode"], policy['binding_policy']
                     )
                 if not proven:
                     continue
+                linked = sorted({e['span_id'] for e in component_evidence if e.get('span_id') and e['span_id'] != source['span_id']})
                 completion = policy.get("completion", {})
                 if set(completion) - {"core_vector", "relation_vector", "nature_vector"}:
                     raise ValueError("alignment knowledge cannot change values, units or identities")
@@ -373,12 +407,14 @@ def align_event_spans(memory, requirements, knowledge_ids, *, control_rule_id):
         source, required, policy, score, linked, component_evidence = next(iter(eligible.values()))
         key = json.dumps([event_id, source["span_id"], required["feature_type"], rule_id, request["slot"]["slot_id"]], ensure_ascii=False)
         span_id = "alignment_" + hashlib.sha256(key.encode()).hexdigest()[:20]
-        if span_id in originals:
+        from .evidence_lifecycle import evidence_validity
+        if span_id in originals and evidence_validity(originals, workspace.get('relations', [])).get(span_id):
             rejected.append({"rule_id": rule_id, "reason": "already_attempted"})
             continue
         derived = deepcopy(source)
         derived.update(deepcopy(policy.get("completion", {})))
-        derived.update(span_id=span_id, feature_type=required["feature_type"])
+        derived.update(span_id=span_id, feature_type=required["feature_type"], status='active')
+        derived.setdefault('metadata', {})['evidence_active'] = True
         derived.setdefault("metadata", {})["semantic_alignment"] = {
             "control_rule_id": control_rule_id, "policy_id": policy["policy_id"],
             "source_span_id": source["span_id"], "target_rule_id": rule_id,
@@ -389,13 +425,22 @@ def align_event_spans(memory, requirements, knowledge_ids, *, control_rule_id):
             "knowledge_edge_ids": list(dict.fromkeys(policy.get("knowledge_edge_ids", []))),
             "semantic_component_evidence": component_evidence,
             "activation_mode": policy["activation_mode"],
+            'binding_policy': deepcopy(policy['binding_policy']),
+            'preserved_fields': list(dict.fromkeys(['value', 'unit', 'entity_id', 'period', *(policy['binding_policy'] or {}).get('equal_fields', [])])),
             "source_fingerprints": {sid: fingerprint(originals[sid]) for sid in [source["span_id"], *linked]},
             "source_relations": [deepcopy(r) for r in workspace.get("relations", [])
                                  if r.get("source_span_id") == source["span_id"] and r.get("target_span_id") in linked],
         }
         # One atomic workspace replacement; preserved unrelated facts and relations.
         updated = deepcopy(workspace)
-        updated.setdefault("spans", []).append(derived)
+        if span_id in originals:
+            if (originals[span_id].get('metadata') or {}).get('evidence_active') is not False:
+                updated.setdefault('metadata', {}).setdefault('derivation_history', []).append({
+                    'span': deepcopy(originals[span_id]), 'workspace_version': workspace.get('version', 0),
+                    'control_rule_id': control_rule_id, 'reason': 'semantic_alignment_refresh'})
+            updated['spans'] = [derived if s.get('span_id') == span_id else s for s in updated['spans']]
+        else:
+            updated.setdefault("spans", []).append(derived)
         if "evidence_span_ids" in updated:
             updated["evidence_span_ids"] = list(dict.fromkeys([*updated["evidence_span_ids"], span_id]))
         for relation in workspace.get("relations", []):
@@ -406,7 +451,8 @@ def align_event_spans(memory, requirements, knowledge_ids, *, control_rule_id):
                 if edge.get(endpoint) == source["span_id"]:
                     edge[endpoint] = span_id
             edge["relation_id"] = str(edge.get("relation_id", "relation")) + "_" + span_id
-            updated.setdefault("relations", []).append(edge)
+            edges = updated.setdefault("relations", [])
+            updated['relations'] = [r for r in edges if r.get('relation_id') != edge['relation_id']] + [edge]
         updated["version"] = int(workspace.get("version", 0)) + 1
         memory.commit_calculated_workspace(event_id, updated, expected_version=int(workspace.get("version", 0)))
         accepted.append(derived["metadata"]["semantic_alignment"])
