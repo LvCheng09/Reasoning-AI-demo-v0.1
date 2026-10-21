@@ -4,6 +4,8 @@
 
 本文说明 Reasoning-AI-demo-v0.1 的设计思想、数据结构、模块组成和实际运行过程。理论术语与 ERS v10 的第 3–4 章对齐，但实现说明以本仓库代码为准，不把论文中的隔离研究功能当作发布版能力。本文不是论文、实验结果报告或性能比较。
 
+实现对齐日期：2026-10-21。下文区分运行时支持的机制、发布种子的实际配置，以及尚未完成的能力。
+
 ## 1 核心思想与实现范围
 
 系统要构建的是有明确前提、可执行、可检查的推理过程，而不仅是一段看起来合理的答案。三个问题需要分开处理：
@@ -16,34 +18,44 @@
 
 有限 Rule 库不等于有限数量的完整题解。相同局部操作可以重新绑定对象、数值和期间，再与其他操作连接成新路径。这个能力取决于规则覆盖、输入质量、合法连接和搜索预算，不能由“有规则组合”直接推出任意领域都能解决。
 
-论文区分执行规则与控制规则两个功能类别。控制规则可以继续调用更具体的控制规则，因而理论上能形成任务相关的多层策略；“两个类别”不是“永远两层”。当前 Demo 有有界 selector 委托、策略切换和失败反馈，但研究版的动态中策略、完整子目标调用／返回和通用依赖失效账本没有合入这里。
+论文区分执行规则与控制规则两个功能类别。控制规则可以继续调用更具体的控制规则，因而理论上能形成任务相关的多层策略；“两个类别”不是“永远两层”。当前发布版包含有界 selector 委托、声明式顺序组合的调用／返回、Activation／Q 执行管理，以及已记录派生支持的失效复核与重绑。它不等于任意任务都能自动生成最优控制层级。
 
 ## 2 模块怎样连接
 
-正常文字入口的实际调用链是：
+文字与结构化图共用同一个后端入口。下面按运行职责展示主线，省略底层交付记录；每轮 Control 仍可发起检索或改变继续路径。
 
-```text
-demo.py 或 main_part.cli
-  -> MainPartModelLauncher.submit_input
-  -> SemanticFrontendAdapter.build_event_graph
-  -> SimpleSemanticFrontend.initial_parse
-  -> 规范化、向量化、Event Graph Contract
-  -> submit_frontend_state_to_working_memory
-  -> RuntimeLauncher.run_once
-  -> SchedulerNew.run
-       Control Rule -> 候选检索 -> Matcher -> Executor
-          ^                                  |
-          +--------- 新结果或失败反馈 ---------+
-       Knowledge 补全 / Memory 路径提示 / 前端定向补图
-       -> Output Gate
-  -> SemanticAnswerService.answer_runtime
-  -> SemanticOutputDecoder
-  -> 确定性答案，或受数值守卫约束的 LLM 措辞
+```mermaid
+flowchart TD
+    T["文字输入"] --> F["前端：翻译、规范化与向量化"]
+    F --> V["图契约与工作内存接线"]
+    G["结构化 Event 图输入"] --> V
+    V --> W["工作记忆：当前事实、关系和目标"]
+    W --> C["Control 组织候选与当前策略"]
+    C --> R["检索规则，检查 Require 与绑定"]
+    R -->|"可行执行模式"| A["已声明契约的 Rule：计算 Activation 响应"]
+    A --> Q["按声明或 Control 选择执行方式与 Q 解释"]
+    Q --> P["执行前复核与 Q 调度"]
+    R -->|"未声明新契约：完整匹配"| E["执行计算、图操作或子规则"]
+    P -->|"允许执行"| E
+    P -->|"等待或拒绝"| C
+    E --> B["检查结果并写回 Event 图"]
+    B --> W
+    B --> O["Control 检查目标与输出条件"]
+    O -->|"继续推理"| C
+    O --> D["输出服务与 Decoder"]
+    D --> Z["批准的完整答案，或未解决／阻断说明"]
+    R -->|"条件缺失、冲突或不成立"| H["Control 判断缺口与恢复方式"]
+    H --> K["Knowledge 定义证明／Memory 路径提示"]
+    K --> W
+    H --> F
+    H -->|"换路、请求信息或停止"| C
 ```
 
-前后端通过 Python 字典传递数据，不需要另开 HTTP 服务。HTTP 是 LLM 客户端访问模型供应商的方式，不是前后端的集成边界。已有 Event 图可直接走 `submit_event_graph`，跳过文字解析，仍经过同一个 Contract、Bridge 和后端运行入口。
+图中的新契约路径并非所有 Rule 必经：未声明 `execution_contract_version=2` 的 Rule 仍走完整 Require 匹配后的二元执行路径；不能给旧 Rule 暗中添加 Activation 或 Q 含义。部分结果的内部计算与面向用户交付部分答案也不是一回事，见第 11 节。
 
-[model_launcher.py](../main_part/model_launcher.py) 负责组装组件；[runtime_launcher.py](../main_part/runtime_launcher.py) 负责输入交付；[scheduler_new.py](../main_part/scheduler_new.py) 推进阶段。三者都不应被当成领域知识库。
+实际文字调用链为 `MainPartModelLauncher.submit_input` → `SemanticFrontendAdapter.build_event_graph` → `SimpleSemanticFrontend.initial_parse` → 规范化、向量化和图契约 → `submit_frontend_state_to_working_memory` → `RuntimeLauncher.run_once` → `SchedulerNew.run`。已有图通过 `submit_event_graph` 跳过文字翻译，但不绕过图契约和运行交付。
+
+前后端通过 Python 字典传递数据，不需要额外 HTTP 服务。HTTP 只用于模型供应商客户端。[model_launcher.py](../main_part/model_launcher.py) 组装组件，[runtime_launcher.py](../main_part/runtime_launcher.py) 交付输入，[scheduler_new.py](../main_part/scheduler_new.py) 推进阶段；它们不是领域知识库。
 
 ## 3 从语义表示到精确事实
 
@@ -70,22 +82,42 @@ nature = beginning
 
 [rule_vector_encoder.py](../main_part/rule_vector_encoder.py) 编码语义字段；[vector_contracts.py](../main_part/vector_contracts.py) 检查表示兼容性；[semantic_subgraph.py](../main_part/semantic_subgraph.py) 支持局部结构检查。语义标签主要便于调试和解释，但 `feature_type`、Rule tag、ID、单位以及控制字段也参与精确判断。因此当前代码不是“所有文字都只用于 debug”。
 
-## 4 候选提出与执行许可分开
+## 4 Require、Activation 与 Q 的分工
 
-论文把这一原则称为 nomination–admission separation：相似度用于提出候选，实际声明的条件决定能否执行。
+相似度用于提出候选，不能代替执行许可。新版把“是否满足前提”“产生怎样的响应”“怎样使用响应”分开处理。
 
-实际链路包括：
+### 4.1 Require：前提、绑定和允许的执行范围
 
-1. [retrieval.py](../main_part/retrieval.py) 和 [matcher/routing.py](../main_part/matcher/routing.py) 根据当前图、向量和 selector 获取候选。
-2. [matcher/pre_match.py](../main_part/matcher/pre_match.py) 根据 Control 声明的范围准备候选。
-3. [matcher/matching.py](../main_part/matcher/matching.py) 检查 required，建立 slot 到当前 span 的绑定。
-4. Scheduler 对匹配后的候选应用目标、置信度、优先级或历史偏好；未经匹配的候选不能因排名高直接执行。
+[retrieval.py](../main_part/retrieval.py)、[matcher/routing.py](../main_part/matcher/routing.py) 和 [matcher/pre_match.py](../main_part/matcher/pre_match.py) 准备候选；[matcher/matching.py](../main_part/matcher/matching.py) 检查 slot、三路向量、关系、来源和声明的数值条件。对象、单位和期间限制必须实际写进 Rule；系统不会自动知道所有领域约束。
 
-`structured_slot_match` 检查 feature 类型、三路向量和声明的来源要求；`bind_span_slots` 处理多个 slot 的共同绑定；关系、共享语义约束及数值条件由相应匹配逻辑继续检查。是否允许同一 span 复用、哪些单位或期间必须一致，取决于 Rule 实际声明的约束，不是系统自动知道所有领域限制。
+[rule_execution_contract.py](../main_part/rule_execution_contract.py) 的 `require_evaluation` 保存完整匹配情况、绑定、缺失项和覆盖度。覆盖度不是正确概率，也不能凭分数高跳过缺失的硬前提。部分执行必须有显式 `partial_modes`，限定所需条件、输入、执行片段和输出，并由声明或 Control 授权；没有对应契约就不能部分执行。
 
-这里的“严格”是执行已声明的契约，不是绝对事实正确性。若前端把错误理解编码成没有冲突的合法事实，结构检查不能自动识别它；若 Rule 漏写必要限制，Matcher 也不能凭空补出限制。
+当前 210 条发布 Rule 中，20 条声明了新版执行契约，190 条保持二元匹配；发布种子的部分执行配置全部为 `disabled`。支持部分模式的运行时代码与测试，不等于当前演示题已启用部分计算。
 
-实现还保留 [matcher/post_match.py](../main_part/matcher/post_match.py) 的临时 require 修订机制：规则标为软条件的项可被临时移除，显式修订操作也能调整边界，然后再次调用同一个 Matcher。这与 Knowledge 证明后补图不同，不能统一描述为“所有 require 永远不变”。软硬条件分类和修订策略需要单独审查；语义补全不应靠临时删掉必需事实冒充成功。
+### 4.2 Activation：声明式响应计算
+
+[activation_semantics.py](../main_part/activation_semantics.py) 的 `evaluate_activation` 按 `activation_spec` 计算一个或多个有类型的信号。输入可以来自当前绑定、上下文、Require 覆盖度、常数、向量运算或已注册的 Calculator 函数。信号可为布尔、实数、区间值、向量或矩阵；必须由后续解释声明其用途，不能默认视为概率或 confidence。
+
+### 4.3 Q：响应的用途，而不是统一置信度
+
+`resolve_q` 按 `q_semantics` 的声明或选定 profile 解释响应：
+
+| 类别 | 支持的解释 | 消费位置 |
+| --- | --- | --- |
+| `dispatch` | 布尔开关、执行概率、执行频率 | `RuleExecutionRuntime.admit/start` 的调度 |
+| `selection` | 可比较的选择分数 | `execution_selection.select_execution` |
+| `transform` | 强度、带符号效果、权重 | 写图前的输出变换 |
+| `assessment` | 显式声明的结果置信度 | 输出评价与元数据 |
+
+这里的 Q 是解释契约，不默认等于强化学习的 Q 值。选择分数必须具有相同 `comparison_key` 才能共同比较；Control 可声明分数门槛、成本权重、预算和是否允许随机选择。概率、频率和分数是不同含义；当前种子的初始偏好也不是经过训练校准的成功率。
+
+### 4.4 选中后仍要复核
+
+[rule_execution_runtime.py](../main_part/rule_execution_runtime.py) 的 `inspect`、`authorize`、`admit`、`revalidate` 和 `start` 把候选快照、Control 权限、当前绑定、函数版本及执行调度串起来。新契约 Rule 执行前重新检查当前输入；绑定、Activation 或 Q 改变时必须重新选择，不能继续使用旧许可。Scheduler 通过 `_prepare_activation_candidates`、`_resolve_rule_activation` 和统一的 `_execute_rule_chain` 接入这一机制。
+
+等待、拒绝和执行失败有不同状态。`WorkingMemoryState.rule_runtime` 保存决策、等待、函数版本和计算失败记录；可序列化不等于 Demo 已提供自动落盘和跨进程恢复的完整命令。
+
+这里的严格检查针对已声明契约，不证明现实事实一定正确。[matcher/post_match.py](../main_part/matcher/post_match.py) 仍支持显式临时 require 修订和软条件移除；它与 Knowledge 证明后补图不同，不能用删除硬前提冒充证据成立。
 
 ## 5 Event Graph 与 Working Memory
 
@@ -97,19 +129,25 @@ nature = beginning
 
 某个 Event 的值不能仅因语义相似就充当另一 Event 的事实。证据是否可用要检查明确关系和声明的范围；输出层还会按批准的 Event 单独投影结果，避免同名 span 串线。不同期间、不同实体的信息也必须在绑定时满足规则要求。
 
-## 6 Rule 网络与执行操作
+## 6 Rule 网络、执行契约与组合
 
-论文将局部规则写为前提、效果、适用条件和执行操作。当前持久化格式主要使用 `required` 和 `produced`：
+`required` 声明条件与绑定，`produced` 声明图更新、计算、控制动作、下一条 Rule 或输出。ID、layer、tag 和优先级用于组织，不是满足前提的替代品。业务知识来自 Rule 库，Executor 不按题号查整题答案。
 
-- `required` 包含条件 slot、关系模式、匹配阈值及声明的约束。
-- `produced` 声明图更新、计算、下一组规则 selector、控制更新或输出操作。
-- Rule ID、layer、tag、优先级和置信度支持组织与选择，不是满足前提的替代品。
+新版持久化在 [persistence/rule_db.py](../main_part/persistence/rule_db.py) 保留以下可选契约，由 [rule_execution_contract.py](../main_part/rule_execution_contract.py) 验证：
 
-这些结构可在 [persistence/rule_db.py](../main_part/persistence/rule_db.py)、[matcher/routing.py](../main_part/matcher/routing.py) 和 [executor_new.py](../main_part/executor_new.py) 中对应找到。业务知识来自 Rule 库，Executor 不靠识别题目编号或预存整题答案来计算。
+| 字段 | 职责 |
+| --- | --- |
+| `execution_contract_version` | 区分完整匹配的二元规则与显式新契约 |
+| `require_policy` | 部分模式、执行方式与 Control 选择要求 |
+| `activation_spec`、`q_semantics` | 响应计算与用途解释 |
+| `io_contract`、`effect_contract` | 必需输入、允许输出与效果类别 |
+| `composition_contract` | 子规则调用、返回绑定及深度／步骤预算 |
 
-运行时路径不是单纯“检索一个完整解法”。一条 Rule 产生的新 span 可以成为下一条 Rule 的输入；`run_rule` 和 `child_rule_selectors` 可以继续选择其他 Rule。局部路径可以有前缀复用、分支或汇合。
+一条 Rule 写回的新 span 可以成为下一条的输入。`run_rule` 和 selector 支持继续检索，[rule_path_candidates.py](../main_part/rule_path_candidates.py) 组织有界兼容候选；它们不枚举所有路径，也不保证全局最优。
 
-[rule_path_candidates.py](../main_part/rule_path_candidates.py) 将互斥分支、资源占用和竞争性图更新组织为有界的兼容候选，之后交给 Control 选择。它不枚举所有可能路径，也不是全局最优求解器。
+另外，[rule_composition.py](../main_part/rule_composition.py) 的 `RuleCompositionRuntime` 实现显式声明的顺序组合：记录父子调用帧和当前位置，逐个匹配并执行真实子规则，检查实际返回值，用 `output_bindings` 连接父输出。子规则仍通过同一 Matcher、执行许可和 Executor，不能绕过条件检查。父子调用共享有界步骤账本，并受深度限制；等待状态可通过运行状态恢复继续。
+
+这种有界调用／返回已经有实现，但不是任意子目标自动分解、任意任务自动产生最优层数的规划器，也不是规则学习或重构。
 
 ## 7 Control 与 Scheduler 的分工
 
@@ -127,9 +165,9 @@ Control 是 Rule 网络中的策略层，不是另一个自由生成答案的 LL
 
 失败由 `_request_control_recovery`、`_request_control_review` 等方法整理成反馈，包括未满足条件、alignment 缺口、执行错误和已尝试范围，再调用 Control Rule 选择下一步。`_synchronize_active_strategy_state` 按 Rule 声明同步当前策略并使旧策略状态不再有效，防止实际已换路而仍按旧路线放行。
 
-[rule_selector.py](../main_part/rule_selector.py) 的 `child_rule_selectors` 传递 Control 来源、已尝试 Rule 和 hop 上限。这是有界委托，不等于完整子目标调用栈。控制层数、业务执行步数和搜索前瞻深度是三个不同量，不能互相替代。
+[rule_selector.py](../main_part/rule_selector.py) 的 `child_rule_selectors` 传递 Control 来源、已尝试 Rule 和 hop 上限。这是搜索委托来源，不是组合调用帧；后者由 `RuleCompositionRuntime` 独立维护。控制层数、业务执行步数和搜索前瞻深度是三个不同量，不能互相替代。
 
-论文提出的“低阶失败先在中策略内换候选，必要时才向外层升级”的动态组织属于研究方向。当前发布版的委托与恢复接口是相关基础，但不能把它写成已全面实现的局部优先递归规划。
+声明式组合可以把若干子规则组织成有边界的调用单元；普通 Control 仍可按失败反馈选择其他 Rule 或策略。不能由调用帧的存在推断已实现任意问题的自动中策略生成，或所有失败都按最优层级局部恢复。
 
 ## 8 Knowledge 补全与 Memory 引导
 
@@ -142,6 +180,8 @@ Control 是 Rule 网络中的策略层，不是另一个自由生成答案的 LL
 - `all_cores`：所有指定 core 必须满足；
 - `relation_context`：关系与邻接 core 一起决定含义。
 
+`single_core`／`all_cores` 必须声明主体与支持组件；多 core 与关系语境还须通过 `binding_policy` 指定实体、期间及同 span／邻接或同 Event 的绑定范围。支持不能从另一主体或期间无条件借用，见 [knowledge_schema_contract.py](../main_part/knowledge_schema_contract.py)。这里的 Knowledge 激活模式不同于第 4 节的 Rule Activation 响应计算。
+
 `select_span_schema_knowledge_ids` 按缺失 require 找定义；`align_event_spans` 验证前提，建立带来源与指纹的新 span，保留原值、单位、实体和期间，然后返回待重匹配的 Rule ID。原始事实不直接改写，歧义或没有证明则拒绝。必要时，后续中间结果可以暴露新的缺口，再进入下一轮补全；是否成功仍由定义和当前证据决定。
 
 Knowledge 不能创造本题没有提供的测量值、审批或销售口径。单 core 的定义也不能把概念的一般能力当成当前已经发生的观测。
@@ -152,38 +192,41 @@ Knowledge 不能创造本题没有提供的测量值、审批或销售口径。�
 
 ## 9 Executor 与 Calculator
 
-[RuleChainExecutor](../main_part/executor_new.py) 接收匹配结果和 `produced`，分派支持的操作、管理图更新和候选路径的资源占用，并记录执行结果。计算值的来源和产生 Rule 在结果元数据中保留；无法计算不能伪装成有效数值。
+[RuleChainExecutor](../main_part/executor_new.py) 接收匹配结果和 `produced`，分派支持的操作、管理图更新和候选路径的资源占用，并记录执行结果。新契约执行通过共享的 `RuleExecutionRuntime` 复核许可，再执行 `produced`；结果受输入、输出与效果契约检查，Q 的输出变换只作用于声明目标。计算结果保留来源和派生支持；无法计算不能伪装成有效数值。
+
+Calculator 将确定性的计算失败与当前输入／公式关联，避免在证据不变时反复执行相同失败计算；相关输入或公式变化后才重新尝试。这不是吞掉异常，Scheduler 仍收到可分类的失败反馈。
 
 [Calculator](../main_part/calculator/service.py) 接收复制的工作区和绑定，返回计算结果，不持有可写 Working Memory。它支持结构化表达式、value policy 和函数调用；[structured_arithmetic.py](../main_part/structured_arithmetic.py) 执行表达式，[runtime_value_binding.py](../main_part/runtime_value_binding.py) 处理运行时取值。
 
 函数调用有 function/version/parameter version 及输入输出检查，代码中也有受控小模型调用接口，但本 Demo 的正式题解依赖已导入规则和确定性计算；这不能当成非线性函数学习已完成验证。Auto-Learn 和参数训练不随发布版提供。
 
-当前没有业务 Rule 到 Primitive Rule Set 的完整编译链。`SchedulerInstructionCompiler` 编译的是控制反馈中的运行程序，不是 PRS 编译器。
+当前没有业务 Rule 到 Primitive Rule Set 的完整编译链。`RuleStrategyCompiler` 编译的是控制反馈中的运行程序，不是 PRS 编译器。
 
 论文对“接受的状态变换”的定义是一项契约目标，不应扩写成所有代码操作都由通用逻辑证明器验证。执行器提供操作对应的检查、写图和错误反馈；事务范围也要区分：Runtime 的异常恢复针对内存 checkpoint，不保证持久化或工具副作用全局 exactly-once。
 
-## 10 三种结构与动态证据边界
+## 10 控制组织、调用帧与动态证据
 
-理解论文和代码时要区分：
+四种结构不能混为一谈：selector 祖先链说明谁发起搜索；组合调用帧说明当前父子调用和返回位置；派生支持说明结论依赖哪些事实；执行历史说明实际尝试顺序。任何一种都不能独自代替其余结构。
 
-1. 控制组织：现在追求哪个目标、哪条策略和哪些候选。
-2. 推导依赖：某个结果由哪些事实和操作支持。
-3. 执行历史：实际按什么顺序尝试、哪些尝试失败。
+[evidence_lifecycle.py](../main_part/evidence_lifecycle.py) 已进入发布推理路径，不再只是保存来源标签：
 
-顺序日志不是完整依赖图，selector 的祖先链也不是完整子目标调用栈。
+- Executor 用 `attach_derivation` 记录实际匹配前提的绑定、语义指纹、Rule 和相关关系，包括参与条件检查的前提，而不只是计算公式中的数值。
+- `evidence_validity` 递归检查支持：同一支持内的前提必须全部有效；已记录的替代支持中任一条仍有效即可保留同一结论；循环自证、失效来源和过期补全不能放行。
+- Control 声明 `review_event_evidence` 后，复核会将失效派生结果退役并保留原生历史；已有另一条有效支持时，可将当前来源指向该支持。
+- Matcher 和输出服务检查证据有效性。修订事实后需要重新计算的结论，仍由 Control 和 Rule 再次匹配执行，不会通过“重绑”把旧数值伪装为新结果。
 
-发布版保留计算来源、语义补全的来源指纹、策略历史和输出快照检查。[alignment_contract.py](../main_part/alignment_contract.py) 可以检查语义补全来源是否仍相符；这不等于通用的派生结论失效传播。
+[alignment_contract.py](../main_part/alignment_contract.py) 继续维护语义补全的来源指纹；它与派生支持账本相互配合。以上检查针对已记录前提、关系和支持的 Event 范围，不是完整 ATMS、跨任意外部工具的依赖系统，也不是任意操作都已接入的证明。
 
-论文还要求共同前提全部有效、独立支持有一条有效即可、禁止循环自证，以及事实撤回后的依赖范围复核。这些完整的动态支持机制没有发布在本仓库。不能把现有 `derived_from_span_ids` 解释成已经实现全部 TMS/ATMS 行为，也不能说任意事实改动都能自动撤回和重绑所有下游结论。
-
-“没有证据”“证据撤回”“证据被反驳”也不是同一状态。缺审批不能自动推为禁止；不能仅根据候选为空就证明全局无解。当前 Runtime 保存 Rule 声明的任务状态，没有明确分类的系统停止保持 unknown。
+Control 还可用 `inspect_rule_frontier` 检查有限范围内是否有可执行且能增加事实的生产规则，再决定继续或停止。未支持的操作、未检查路线或预算耗尽不能当作全局无解。没有证据、证据撤回和证据被反驳也不同；缺审批不能自动推成禁止。
 
 ## 11 输出接受与文字回答
 
 论文的接受条件是目标、任务约束和证据同时成立。代码通过两层边界落实当前支持的检查：
 
 1. Scheduler 的 `_append_output`、`_apply_output_gate_decision` 和 `_active_control_completion_decision` 让 Control 检查候选或当前策略的完成条件。
-2. [output_service.py](../main_part/output_service.py) 仅在任务为 solved、有输出门批准、Event 范围唯一、目标 ID 有效且快照一致时，构造用户输出。显式目标必须全部可解码，不能缺一个结果就自由挑其他 span。
+2. [output_service.py](../main_part/output_service.py) 仅在任务为 solved、有输出门批准、Event 范围唯一、目标 ID 有效且快照一致时，构造用户输出。显式目标必须全部可解码，来源支持失效也不能放行，不能缺一个结果就自由挑其他 span。
+
+新契约可在内部产生带 `execution_scope=partial` 的结果，但部分结果不能被直接标为任务 solved。当前输出服务仍要求 solved 才投影正式答案；pending、blocked 和未解决状态应保留说明。因此流程图里的“部分答案”属于待完善的用户交付能力，不能仅凭部分计算已实现就宣称完成。
 
 [output_decoder.py](../main_part/output_decoder.py) 读取结果与支持事实；不是把 embedding 数组直接翻译回文字。它使用保留的结构、语义标签和数值生成确定性草稿。
 
@@ -200,6 +243,8 @@ Knowledge 不能创造本题没有提供的测量值、审批或销售口径。�
 接线：规范化 -> 三路向量 -> Contract -> Event Workspace
 Control：通用入口 -> DSO 领域策略
 Matcher：在本题事实中绑定所需 slot，检查声明约束
+Activation / Q：对已声明的新契约计算响应、选择执行方式
+执行运行时：复核当前绑定、授权和调度条件
 Calculator：120 / 960 × 360 = 45
 Executor：写入 dso_result = 45 days，并保留计算来源
 Output Gate：检查当前策略完成条件
@@ -230,6 +275,14 @@ Decoder / Verbalizer：形成数值不变的用户回答
 - [test_release_runtime.py](../tests/test_release_runtime.py)：输入交付失败、API 契约、用量和回退。
 - [test_output_presentation.py](../tests/test_output_presentation.py) 与 [output_decoder/](../tests/output_decoder/)：结果选择和解码。
 
+- [test_rule_activation.py](../tests/test_rule_activation.py)：响应、Q、授权、部分执行、等待与嵌套组合。
+- [test_execution_selection.py](../tests/test_execution_selection.py)：可比分数、Control 选择与执行复核。
+- [test_require_gaps.py](../tests/test_require_gaps.py)：缺口分类、真实 Scheduler 恢复与补充信息后的重匹配。
+- [test_evidence_lifecycle.py](../tests/test_evidence_lifecycle.py)：派生失效、替代支持、历史与祖先链。
+- [test_context_contract_fixes.py](../tests/test_context_contract_fixes.py)：主体／期间绑定与补全证据变化。
+- [test_deterministic_computation_recovery.py](../tests/test_deterministic_computation_recovery.py)：重复计算失败抑制与证据变化后的恢复。
+- [test_portable_seed.py](../tests/test_portable_seed.py)：种子校验、恢复、隔离与学习规则排除。
+
 [validate_release_runtime.py](../tools/validate_release_runtime.py) 从人工构造的图运行真实本地向量和完整 Scheduler；它不调用外部前端，也不是盲测。安装、命令及运行限制见 [README](../README.md)。
 
 ## 15 代码目录与发布边界
@@ -244,15 +297,18 @@ Decoder / Verbalizer：形成数值不变的用户回答
 | 调度与控制 | `scheduler_new.py`、`control_voc.py` | 推进阶段、观察状态、调用策略 |
 | 严格匹配 | `matcher/` | 条件成立与候选评分分开 |
 | 路径组织 | `rule_selector.py`、`rule_path_candidates.py` | 支持局部委托、冲突与继续路径 |
+| 响应与执行许可 | `activation_semantics.py`、`rule_execution_contract.py`、`rule_execution_runtime.py` | 前提、响应、解释与执行授权分开 |
+| 执行选择与组合 | `execution_selection.py`、`rule_composition.py` | 可比候选选择与子规则调用分开 |
+| 缺口与证据 | `require_gaps.py`、`evidence_lifecycle.py` | 恢复决策与来源有效性检查分开 |
 | 执行和计算 | `executor_new.py`、`calculator/` | 写图与计算服务分开 |
 | 持久化与隔离 | `persistence/`、`runtime_databases.py` | 公共种子与可写运行副本分开 |
 | 结果展示 | `output_service.py`、`output_decoder.py`、`answer_verbalizer.py` | 展示不能重新授权推理 |
 
 表中未写前缀的 Python 文件均位于 `main_part/`。
 
-发布种子是 `data/demo/db/rule.sqlite` 和 `knowledge.sqlite`。默认入口通过 [runtime_databases.py](../main_part/runtime_databases.py) 用 SQLite backup 建立 `runtime/inference_*` 副本；检索计数、索引和运行 Memory 只写副本。显式路径也不能通过软链接或硬链接绕回种子。底层库和正式发布工具的权限不能混同于这个推理入口保护。
+发布种子为 `data/demo_v2/seed.json.gz`，含 210 条推理 Rule、106 条 Knowledge；`manifest.json` 保存数量与校验和。默认入口由 [demo_seed.py](../main_part/demo_seed.py) 校验后恢复到独立的 `runtime/inference_*` SQLite 库，运行 Memory 从空库开始。原发布的 191 条 Rule 保留并更新，新增 19 条通用推理 Control；36 条学习 Rule 和 13 条新增宽泛金融业务 Rule 未纳入此发布种子。后 13 条曾干扰供应链候选选择，排除不代表干扰问题已经修复。旧 `data/demo/db/` 仅为显式回归种子，不是默认入口。检索计数和索引只写运行库，显式路径也不能用软／硬链接绕回旧种子。
 
-本仓库提供两个相连领域的推理 Demo，不包含论文原文、实验数据、Auto-Learn、训练任务、PRS 编译器、视觉入口或完整动态依赖维护。显式条件与规则执行借鉴生产系统、分层规划和真值维护的已有机制；本设计重点是它们与语义候选、当前 Event 状态和执行反馈的结合，而不是宣称这些单个机制从未存在。
+本仓库提供两个相连领域的推理 Demo，不包含论文原文、实验数据、Auto-Learn、训练任务、PRS 编译器或视觉入口；有界组合与动态证据维护以第 6、10 节的实际范围为准。显式条件与规则执行借鉴生产系统、分层规划和真值维护的已有机制；本设计重点是它们与语义候选、当前 Event 状态和执行反馈的结合，而不是宣称这些单个机制从未存在。
 
 ## 16 与世界模型的对比
 
@@ -268,7 +324,7 @@ ERS 用可执行 Rule 连接当前事实和新结果，检查前提、对象绑�
 
 一些分层世界模型使用预设层级，或通过学习形成层级表示；仅观察潜在状态不一定能直接指出哪条前提失败、哪条规则冲突或哪项依赖变化。
 
-ERS 的理论设计根据当前任务的依赖结构组织控制层级：缺少前提、出现新信息或执行失败时，调整相关子目标和继续路径，而不只是让原路径继续产生低质量结果。当前 Demo 的 selector 委托、策略同步和失败反馈是相关实现基础；完整动态中策略与子目标调用／返回仍不在本发布版中。
+ERS 的理论设计根据当前任务的依赖结构组织控制层级：缺少前提、出现新信息或执行失败时，调整相关子目标和继续路径，而不只是让原路径继续产生低质量结果。当前 Demo 已提供 selector 委托、策略同步、失败反馈，以及声明式顺序子规则调用／返回；它们不等于任意任务的自动中策略生成与最优层级选择。
 
 ### 16.3 能力扩展与长期维护
 
@@ -292,7 +348,7 @@ ERS 记录实际绑定、匹配失败、执行结果和来源，使不同问题�
 
 事实与任务约束会改变。没有显式依赖记录时，仅靠状态预测难以直接确定哪些旧结论受影响、哪些结论仍有独立支持。
 
-ERS 的理论机制保留对象身份、有效期间、来源和推导依赖：前提修改、撤回或失效后，复核相关下游支持；若其他独立依据仍有效，则保留结论。撤回不是反驳，失去一条支持也不等于全部支持消失。当前 Demo 只有计算来源、alignment 指纹和输出快照等相关检查，不能据此宣称完整依赖失效传播、独立支持维护与重绑已经发布。
+ERS 的理论机制保留对象身份、有效期间、来源和推导依赖：前提修改、撤回或失效后，复核相关下游支持；若其他独立依据仍有效，则保留结论。撤回不是反驳，失去一条支持也不等于全部支持消失。当前 Demo 已通过派生支持记录、递归有效性检查、Control 复核、历史保留和已记录替代支持的重绑落实其中一部分。覆盖范围是已接入的 Event 派生与关系，不是完整 ATMS 或任意外部操作的依赖维护。
 
 ### 16.7 推理评价与输出接受
 

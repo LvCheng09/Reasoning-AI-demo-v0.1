@@ -4,6 +4,8 @@
 
 This tech report explains the design, data structures, components, and actual execution of Reasoning-AI-demo-v0.1. Its terminology follows Chapters 3–4 of the ERS v10 theory manuscript, but implementation statements refer to this repository. Research-only mechanisms are not presented as released capabilities. This is neither the paper nor an experimental-results or performance-comparison report.
 
+Implementation alignment: 2026-10-21. The report distinguishes runtime mechanisms, actual released seed configuration, and capabilities that remain incomplete.
+
 ## 1 Design principle and implementation scope
 
 The system constructs an executable, inspectable reasoning process with explicit premises rather than accepting a plausible explanation alone. It separates three questions:
@@ -16,34 +18,44 @@ The frontend LLM addresses the first question. Matcher and execution contracts c
 
 A finite Rule library need not store a complete solution for every task. A local operation can be rebound to new objects, values, and periods and connected to other operations. The resulting coverage depends on Rule coverage, input quality, admissible composition, and search budget. Rule composition does not establish arbitrary-domain competence.
 
-The paper distinguishes execution and control rules by function. A control rule may call a more specialized control rule, forming task-dependent levels: two functional categories do not mean a permanently two-level hierarchy. The demo supports bounded selector delegation, strategy switching, and failure feedback. The research implementation of dynamic intermediate strategies, full subgoal invocation/return, and a general dependency-invalidation ledger is not included here.
+The paper distinguishes execution and control rules by function; two categories do not imply exactly two levels. The release now includes bounded selector delegation, declared sequential child calls and returns, Activation/Q execution management, and validity review and rebinding of recorded derivation supports. These mechanisms do not establish optimal automatically generated control hierarchies for arbitrary tasks.
 
 ## 2 How the components connect
 
-The actual text-input call chain is:
+Text and structured graphs converge at the same backend boundary. This diagram shows runtime responsibilities rather than every delivery record; Control may request retrieval or change the continuation on each round.
 
-```text
-demo.py or main_part.cli
-  -> MainPartModelLauncher.submit_input
-  -> SemanticFrontendAdapter.build_event_graph
-  -> SimpleSemanticFrontend.initial_parse
-  -> normalization, vectorization, Event Graph Contract
-  -> submit_frontend_state_to_working_memory
-  -> RuntimeLauncher.run_once
-  -> SchedulerNew.run
-       Control Rule -> retrieval -> Matcher -> Executor
-          ^                                      |
-          +---------- results or failure feedback+
-       Knowledge completion / Memory hints / targeted frontend patch
-       -> Output Gate
-  -> SemanticAnswerService.answer_runtime
-  -> SemanticOutputDecoder
-  -> deterministic answer, or numerically guarded LLM wording
+```mermaid
+flowchart TD
+    T["Text input"] --> F["Frontend: translation, normalization and vectors"]
+    F --> V["Graph contract and workspace bridge"]
+    G["Structured Event Graph"] --> V
+    V --> W["Working Memory: current facts, relations and goals"]
+    W --> C["Control: candidate scope and current strategy"]
+    C --> R["Retrieve Rules; check Require and bindings"]
+    R -->|"Feasible execution modes"| A["Contract-declared Rules: Activation signals"]
+    A --> Q["Declaration or Control: execution mode and Q interpretation"]
+    Q --> P["Pre-execution revalidation and Q dispatch"]
+    R -->|"No new contract: full match"| E["Calculation, graph operation or child Rules"]
+    P -->|"Ready"| E
+    P -->|"Wait or reject"| C
+    E --> B["Check results and write back to Event Graph"]
+    B --> W
+    B --> O["Control: goal and output acceptance"]
+    O -->|"Continue reasoning"| C
+    O --> D["Output service and Decoder"]
+    D --> Z["Approved full answer, or unresolved / blocked explanation"]
+    R -->|"Missing, conflicting or false premises"| H["Control: gap classification and recovery"]
+    H --> K["Knowledge proof / Memory path hints"]
+    K --> W
+    H --> F
+    H -->|"Switch path, request information or stop"| C
 ```
 
-The frontend/backend boundary is a Python dictionary, not a separate HTTP service. HTTP connects the LLM client to its provider. An existing graph can enter through `submit_event_graph`, bypassing text parsing but using the same Contract, Bridge, and backend runtime.
+Not every Rule follows the new-contract branch. Rules without `execution_contract_version=2` retain full-Require binary execution; Activation and Q meanings are not silently added to them. Internal partial results are not automatically user-facing partial answers; see Section 11.
 
-[model_launcher.py](../main_part/model_launcher.py) composes the components; [runtime_launcher.py](../main_part/runtime_launcher.py) delivers inputs; [scheduler_new.py](../main_part/scheduler_new.py) advances execution stages. These responsibilities should not be confused with domain knowledge.
+The text call chain is `MainPartModelLauncher.submit_input` → `SemanticFrontendAdapter.build_event_graph` → `SimpleSemanticFrontend.initial_parse` → normalization, vectors and graph validation → `submit_frontend_state_to_working_memory` → `RuntimeLauncher.run_once` → `SchedulerNew.run`. `submit_event_graph` skips text translation, not graph validation or delivery.
+
+Frontend/backend communication uses in-process Python dictionaries, not a separate HTTP server. Only provider clients require HTTP. [model_launcher.py](../main_part/model_launcher.py) assembles components, [runtime_launcher.py](../main_part/runtime_launcher.py) delivers inputs, and [scheduler_new.py](../main_part/scheduler_new.py) advances stages; none is a domain knowledge library.
 
 ## 3 Semantic representation and exact facts
 
@@ -70,22 +82,42 @@ These labels explain the vector channels; they do not require three equal string
 
 [rule_vector_encoder.py](../main_part/rule_vector_encoder.py) encodes semantic fields, [vector_contracts.py](../main_part/vector_contracts.py) checks compatibility, and [semantic_subgraph.py](../main_part/semantic_subgraph.py) checks local structure. Semantic labels mainly support debugging and explanation, but `feature_type`, Rule tags, IDs, units, and control fields also participate in exact checks. It would be inaccurate to say that every textual field in this implementation is debug-only.
 
-## 4 Candidate nomination is not execution admission
+## 4 Separate Require, Activation and Q
 
-The paper calls this nomination–admission separation: similarity proposes candidates, while the declared conditions decide which can execute.
+Similarity nominates candidates; it does not grant execution permission. The updated design separates premise satisfaction, computed responses, and the use of those responses.
 
-The implemented stages are:
+### 4.1 Require: premises, bindings and execution scope
 
-1. [retrieval.py](../main_part/retrieval.py) and [matcher/routing.py](../main_part/matcher/routing.py) obtain candidates using the current graph, vectors, and selectors.
-2. [matcher/pre_match.py](../main_part/matcher/pre_match.py) prepares candidates within Control-declared scope.
-3. [matcher/matching.py](../main_part/matcher/matching.py) checks `required` and binds slots to current spans.
-4. Scheduler applies goal, confidence, priority, or historical preferences to matched candidates. Ranking does not admit an unmatched candidate.
+[retrieval.py](../main_part/retrieval.py), [matcher/routing.py](../main_part/matcher/routing.py), and [matcher/pre_match.py](../main_part/matcher/pre_match.py) prepare candidates. [matcher/matching.py](../main_part/matcher/matching.py) checks slots, semantic vectors, relations, provenance and declared numerical predicates. Entity, unit and period restrictions must be declared; the system does not implicitly know every domain constraint.
 
-`structured_slot_match` checks feature types, semantic channels, and declared source requirements; `bind_span_slots` checks joint bindings. Additional logic checks relations, shared semantic constraints, and numerical conditions. Span reuse, unit consistency, and period consistency depend on the constraints actually declared by the Rule; the system does not automatically know every domain restriction.
+`require_evaluation` in [rule_execution_contract.py](../main_part/rule_execution_contract.py) records full matching, bindings, missing requirements and coverage. Coverage is not correctness probability and cannot override a missing hard premise. Partial execution needs explicit `partial_modes` declaring required premises, inputs, produced subsets and outputs, plus declaration- or Control-based authorization. Without that contract, partial execution is not permitted.
 
-“Strict” means enforcement of a declared contract, not a guarantee of factual truth. An incorrectly translated input that looks like a valid fact cannot automatically be detected by structural checks. A missing condition in a Rule is likewise not supplied by Matcher.
+Of the 210 released Rules, 20 declare the new execution contract and 190 retain binary matching. Every released seed Rule has partial execution `disabled`. Runtime support and tests for partial modes do not mean the current demonstration cases enable partial computation.
 
-The implementation also retains temporary require revision in [matcher/post_match.py](../main_part/matcher/post_match.py). Explicitly soft conditions can be removed temporarily, and explicit revision operations can change matching boundaries before retrying the same Matcher. This is distinct from Knowledge-backed graph completion; not every `required` contract remains unchanged. Soft/hard classification and revision policy require separate review. Removing a necessary fact is not evidence that semantic completion succeeded.
+### 4.2 Activation: declared response computation
+
+`evaluate_activation` in [activation_semantics.py](../main_part/activation_semantics.py) evaluates one or more typed signals from `activation_spec`. Sources include current bindings, context, Require coverage, constants, vector operations and registered Calculator functions. Signals may be Boolean, real, unit-interval, vector or matrix values. Their uses require explicit interpretation; no signal is implicitly a probability or confidence.
+
+### 4.3 Q: response interpretation, not a universal confidence
+
+`resolve_q` interprets responses according to `q_semantics` or a selected profile:
+
+| Category | Supported meanings | Consumer |
+| --- | --- | --- |
+| `dispatch` | Boolean gate, execution probability, frequency | `RuleExecutionRuntime.admit/start` |
+| `selection` | Comparable selection score | `execution_selection.select_execution` |
+| `transform` | Intensity, signed effect, weight | Output transformation before graph writeback |
+| `assessment` | Explicit result confidence | Result assessment and metadata |
+
+Q is an interpretation contract, not necessarily a reinforcement-learning Q value. Selection scores need the same `comparison_key` to be compared. Control may declare score thresholds, cost weights, budgets and whether random selection is allowed. Probability, frequency and score have different meanings; authored seed preferences are not trained, calibrated success rates.
+
+### 4.4 Selection still requires revalidation
+
+`inspect`, `authorize`, `admit`, `revalidate` and `start` in [rule_execution_runtime.py](../main_part/rule_execution_runtime.py) connect candidate snapshots, Control authority, current bindings, function versions and dispatch. New-contract Rules recheck current inputs before execution. Changed bindings, Activation or Q require reselection instead of reuse of an obsolete permission. Scheduler integrates this through `_prepare_activation_candidates`, `_resolve_rule_activation` and its shared `_execute_rule_chain`.
+
+Waiting, rejection and execution failure are different outcomes. `WorkingMemoryState.rule_runtime` stores decisions, waiting states, function versions and computation failures. Serializable state is not a complete Demo CLI for automatic disk checkpoints and cross-process resume.
+
+Strictness applies to declared contracts, not guaranteed real-world truth. [matcher/post_match.py](../main_part/matcher/post_match.py) still supports explicit temporary require revision and soft-condition removal. Those operations are distinct from Knowledge-proven completion and cannot make deletion of a hard premise count as supporting evidence.
 
 ## 5 Event Graph and Working Memory
 
@@ -97,19 +129,25 @@ Backend [WorkingMemoryState](../main_part/data_structure.py) holds per-Event wor
 
 One Event's value cannot become another Event's fact merely through similarity. Reuse requires explicit relations and declared scope compatibility. The presentation layer additionally projects results within the approved Event to prevent identical span IDs from mixing results. Bindings must also satisfy declared entity and period constraints.
 
-## 6 Rule networks and execution operations
+## 6 Rule networks, execution contracts and composition
 
-The paper describes a local rule using premises, effects, applicability conditions, and an execution operator. The persistent code representation principally uses `required` and `produced`:
+`required` declares premises and bindings; `produced` declares graph updates, calculations, control actions, subsequent Rules or outputs. IDs, layers, tags and priorities organize selection, not premise satisfaction. Business knowledge comes from the Rule registry, not a question-ID lookup in Executor.
 
-- `required` contains condition slots, relation patterns, matching thresholds, and declared constraints.
-- `produced` specifies graph changes, calculations, subsequent selectors, control updates, or output operations.
-- Rule IDs, layers, tags, priorities, and confidence organize selection; they do not substitute for satisfied premises.
+[persistence/rule_db.py](../main_part/persistence/rule_db.py) preserves the following optional contracts, checked by [rule_execution_contract.py](../main_part/rule_execution_contract.py):
 
-See [persistence/rule_db.py](../main_part/persistence/rule_db.py), [matcher/routing.py](../main_part/matcher/routing.py), and [executor_new.py](../main_part/executor_new.py). Domain logic comes from the Rule library rather than from question IDs or stored complete answers in Executor.
+| Field | Responsibility |
+| --- | --- |
+| `execution_contract_version` | Distinguishes full-match binary Rules from explicit new contracts |
+| `require_policy` | Partial modes, execution mode and Control selection requirements |
+| `activation_spec`, `q_semantics` | Response computation and interpretation |
+| `io_contract`, `effect_contract` | Required inputs, permitted outputs and effect category |
+| `composition_contract` | Child calls, return bindings, depth and step budgets |
 
-A runtime path need not be a retrieved complete procedure. A produced span becomes another Rule's input; `run_rule` and `child_rule_selectors` continue Rule selection. Local paths can share prefixes, branch, and converge.
+A newly written span can become another Rule's input. `run_rule` and selectors support further retrieval; [rule_path_candidates.py](../main_part/rule_path_candidates.py) organizes bounded compatible alternatives. These mechanisms do not enumerate every path or guarantee global optimality.
 
-[rule_path_candidates.py](../main_part/rule_path_candidates.py) creates bounded compatible alternatives for exclusive branches, resource claims, and competing graph mutations, then submits the choice to Control. It neither enumerates all possible paths nor guarantees a global optimum.
+`RuleCompositionRuntime` in [rule_composition.py](../main_part/rule_composition.py) additionally implements explicitly declared sequential composition: parent/child frames and positions, fresh matching and execution of actual children, checked return values, and `output_bindings` for parent outputs. Children use the same Matcher, admission runtime and Executor; composition does not bypass prerequisites. Nested calls share a bounded step ledger and a depth limit, and waiting frames can continue from restored runtime state.
+
+This bounded call/return mechanism is implemented. It is not arbitrary automatic subgoal decomposition, optimal task-dependent depth selection, Rule learning or reconstruction.
 
 ## 7 Control and Scheduler
 
@@ -127,9 +165,9 @@ Control is the strategy layer of the Rule network, not another unconstrained ans
 
 `_request_control_recovery` and `_request_control_review` organize unmet conditions, alignment gaps, execution errors, and attempted scope into feedback for Control. `_synchronize_active_strategy_state` applies a Rule-declared strategy update and deactivates the old strategy state so recovery does not authorize output under an obsolete route.
 
-In [rule_selector.py](../main_part/rule_selector.py), `child_rule_selectors` propagates Control ancestry, attempted Rules, and a hop limit. This is bounded delegation, not a complete subgoal stack. Control depth, executed business-step count, and search-lookahead depth are different quantities.
+In [rule_selector.py](../main_part/rule_selector.py), `child_rule_selectors` propagates Control ancestry, attempted Rules, and a hop limit. This records search delegation, not composition frames; `RuleCompositionRuntime` maintains the latter separately. Control depth, executed business-step count, and search-lookahead depth are different quantities.
 
-The paper's local-first strategy—try another candidate inside the current intermediate strategy before escalating to an enclosing strategy—is a research mechanism. Released delegation and recovery are related foundations, not a full implementation of adaptive local-first recursive planning.
+Declared compositions group child Rules into bounded invocation units; ordinary Control can still select another Rule or strategy after failure. Frames do not establish automatic intermediate-strategy generation for arbitrary problems or optimal local recovery for every failure.
 
 ## 8 Knowledge completion and Memory guidance
 
@@ -142,6 +180,8 @@ The two mechanisms support reasoning in different ways.
 - `all_cores`: every specified core must hold;
 - `relation_context`: relations and adjacent cores determine the interpretation.
 
+`single_core`/`all_cores` require explicit subject/support roles. Multi-core and relation-context definitions additionally declare `binding_policy` for entity, period and same-span/linked or same-Event scope. Support cannot be borrowed unconditionally from another entity or period; see [knowledge_schema_contract.py](../main_part/knowledge_schema_contract.py). These Knowledge activation modes are distinct from Rule Activation response computation in Section 4.
+
 `select_span_schema_knowledge_ids` locates definitions for missing requirements. `align_event_spans` verifies premises and creates a provenance- and fingerprint-bearing span while preserving the original value, unit, entity, and period. It returns Rule IDs for rematching. Originals are not rewritten; ambiguity and unsupported completion are rejected. Subsequent intermediate results may expose further gaps and trigger another completion round, subject to definitions and evidence.
 
 Knowledge cannot create an unobserved measurement, approval, or sales basis. A single-core definition does not turn a general capability into a current observation.
@@ -152,38 +192,41 @@ The release ships Rule and Knowledge seeds, not historical Memory. Recording run
 
 ## 9 Executor and Calculator
 
-[RuleChainExecutor](../main_part/executor_new.py) receives matched Rules and `produced`, dispatches supported operations, manages graph writes and candidate-path resource claims, and records outcomes. Computed results retain source and producing-Rule metadata. A failed calculation cannot masquerade as a valid numerical result.
+[RuleChainExecutor](../main_part/executor_new.py) receives matched Rules and `produced`, dispatches supported operations, manages graph writes and candidate-path resource claims, and records outcomes. New-contract execution uses the shared `RuleExecutionRuntime` before `produced`. Input, output and effect contracts constrain results; Q output transformations target only declared outputs. Computed results retain sources and derivation supports. A failed calculation cannot masquerade as a valid number.
+
+Calculator associates deterministic computation failures with current inputs and expressions, preventing unchanged failures from being repeatedly recomputed. Changed relevant inputs or expressions permit another attempt. Errors remain visible and classified in Scheduler feedback.
 
 [Calculator](../main_part/calculator/service.py) receives copied workspace data and bindings and returns results without owning writable Working Memory. It supports structured expressions, value policies, and function calls. [structured_arithmetic.py](../main_part/structured_arithmetic.py) evaluates expressions; [runtime_value_binding.py](../main_part/runtime_value_binding.py) resolves runtime values.
 
 Function calls have function/version/parameter-version and input/output contracts. Controlled small-model interfaces exist, but formal demo solutions rely on imported Rules and deterministic calculations. Their existence does not establish learned nonlinear-function performance. Auto-Learn and parameter training are not distributed.
 
-There is no complete business-Rule-to-Primitive-Rule-Set compilation chain. `SchedulerInstructionCompiler` compiles controller feedback into a runtime program; it is not a PRS compiler.
+There is no complete business-Rule-to-Primitive-Rule-Set compilation chain. `RuleStrategyCompiler` compiles controller feedback into a runtime program; it is not a PRS compiler.
 
 The paper's accepted-transition definition is a specification objective, not evidence of a general logical verifier over all code operations. Executor supplies operation-specific checks, graph writes, and error feedback. Transaction boundaries also matter: Runtime exception recovery restores an in-memory checkpoint, not globally exactly-once persistent or external tool effects.
 
-## 10 Three structures and the dynamic-evidence boundary
+## 10 Control organization, call frames and dynamic evidence
 
-Distinguish three views:
+Four structures have different roles: selector ancestry identifies search initiators; composition frames identify current calls and return positions; derivation supports identify premises; execution history records attempted order. None alone replaces the others.
 
-1. Control organization: the current goal, strategy, and candidates.
-2. Derivation dependencies: the facts and operations supporting a result.
-3. Execution history: the chronological sequence of successful and failed attempts.
+[evidence_lifecycle.py](../main_part/evidence_lifecycle.py) is now part of released inference rather than provenance labels alone:
 
-A chronological log is not the complete dependency graph; selector ancestry is not a complete subgoal invocation stack.
+- Executor's `attach_derivation` records bindings, semantic fingerprints, Rule identity and relevant relations for actual matched premises, including predicate premises rather than only numerical operands.
+- `evidence_validity` checks support recursively: all premises in one support must remain valid; any recorded valid alternative can preserve the same conclusion. Circular self-justification, stale sources and obsolete alignments are rejected.
+- A Control-declared `review_event_evidence` retires unsupported derivations while preserving native history. If another recorded support remains valid, current provenance may be rebound to it.
+- Matcher and output projection check evidence validity. Conclusions requiring recalculation after changed facts still need Control-guided rematching and Rule execution; rebinding does not turn an old numerical value into a newly computed result.
 
-The release retains computation sources, semantic-alignment fingerprints, strategy history, and output-snapshot checks. [alignment_contract.py](../main_part/alignment_contract.py) checks whether alignment sources still agree. That is not general invalidation propagation for derived conclusions.
+[alignment_contract.py](../main_part/alignment_contract.py) continues to check alignment source fingerprints alongside derivation supports. These mechanisms operate within recorded premises, relations, supports and Event scopes. They are not a complete ATMS, an arbitrary external-tool dependency system, or proof that every operation is covered.
 
-The paper additionally requires all joint premises to hold, any independently valid alternative support to suffice, no circular self-justification, and dependency-scoped revalidation after withdrawal. The complete dynamic-support mechanism is not released here. `derived_from_span_ids` does not implement all TMS/ATMS behavior, and arbitrary fact changes do not automatically retract and rebind every downstream conclusion.
-
-Absent evidence, withdrawn evidence, and contradicted evidence are different states. Missing approval does not automatically mean prohibition; no retrieved candidate does not establish global impossibility. Runtime preserves Rule-declared task verdicts and leaves unclassified system stops unknown.
+Control may also use `inspect_rule_frontier` to inspect a bounded producer inventory for currently executable Rules that add facts before deciding whether to continue. Unsupported operations, unexamined routes and exhausted budgets do not establish global impossibility. Absent, withdrawn and contradicted evidence remain distinct; missing approval does not imply prohibition.
 
 ## 11 Output acceptance and user-facing text
 
 The paper requires goal satisfaction, task constraints, and evidence together. The currently supported implementation uses two boundaries:
 
 1. Scheduler's `_append_output`, `_apply_output_gate_decision`, and `_active_control_completion_decision` apply Control decisions or the active strategy's completion requirements.
-2. [output_service.py](../main_part/output_service.py) projects user results only for a solved task, an approved output, a unique Event scope, valid target IDs, and consistent snapshots. Explicit targets must all decode; missing targets cannot be replaced by arbitrarily chosen spans.
+2. [output_service.py](../main_part/output_service.py) projects user results only for a solved task, an approved output, a unique Event scope, valid target IDs, and consistent snapshots. Explicit targets must all decode and retain valid support; missing targets cannot be replaced by arbitrary spans.
+
+New contracts may produce internal `execution_scope=partial` results, but these cannot directly complete a task as solved. The current output service still requires solved status for formal answer projection; pending, blocked and unresolved outcomes retain their explanation. User-facing partial-answer delivery is therefore not established merely by implemented partial computation.
 
 [output_decoder.py](../main_part/output_decoder.py) reads results and supporting facts. It does not invert embedding arrays into language: retained structure, labels, and values produce a deterministic draft.
 
@@ -200,6 +243,8 @@ Frontend: avg_ar, net credit sales, days, and the requested goal
 Boundary: normalization -> semantic vectors -> Contract -> Event Workspace
 Control: generic entry -> DSO domain strategy
 Matcher: bind current facts and check declared constraints
+Activation / Q: compute responses and select declared execution modes
+Execution runtime: revalidate bindings, authorization and dispatch
 Calculator: 120 / 960 × 360 = 45
 Executor: dso_result = 45 days, retaining computation sources
 Output Gate: check active-strategy completion requirements
@@ -230,6 +275,14 @@ Offline checks validate interfaces and constraints; they do not establish live-L
 - [test_release_runtime.py](../tests/test_release_runtime.py): delivery failure, API contracts, usage, and fallback.
 - [test_output_presentation.py](../tests/test_output_presentation.py) and [output_decoder/](../tests/output_decoder/): result selection and decoding.
 
+- [test_rule_activation.py](../tests/test_rule_activation.py): signals, Q, authorization, partial execution, waiting and nested composition.
+- [test_execution_selection.py](../tests/test_execution_selection.py): comparable scores, Control selection and revalidation.
+- [test_require_gaps.py](../tests/test_require_gaps.py): gap classification, actual Scheduler recovery and rematching after clarification.
+- [test_evidence_lifecycle.py](../tests/test_evidence_lifecycle.py): invalidation, alternative supports, history and ancestry.
+- [test_context_contract_fixes.py](../tests/test_context_contract_fixes.py): entity/period binding and changing completion evidence.
+- [test_deterministic_computation_recovery.py](../tests/test_deterministic_computation_recovery.py): unchanged-failure suppression and recovery after evidence changes.
+- [test_portable_seed.py](../tests/test_portable_seed.py): checksum, restore, isolation and excluded learning Rules.
+
 [validate_release_runtime.py](../tools/validate_release_runtime.py) runs authored graphs through real cached embeddings and the full Scheduler. It does not call the external frontend and is not a blind evaluation. See [README_EN](../README_EN.md) for installation, commands, and runtime limits.
 
 ## 15 Code organization and release boundaries
@@ -244,15 +297,18 @@ Offline checks validate interfaces and constraints; they do not establish live-L
 | Scheduling and control | `scheduler_new.py`, `control_voc.py` | Stage advancement, observations, and strategy invocation |
 | Strict matching | `matcher/` | Applicability separate from candidate scores |
 | Path organization | `rule_selector.py`, `rule_path_candidates.py` | Delegation, conflicts, and continuations |
+| Response and admission | `activation_semantics.py`, `rule_execution_contract.py`, `rule_execution_runtime.py` | Separate premises, responses, meanings and authorization |
+| Execution choice and composition | `execution_selection.py`, `rule_composition.py` | Separate comparable selection from child invocation |
+| Gaps and evidence | `require_gaps.py`, `evidence_lifecycle.py` | Separate recovery decisions from source validity checks |
 | Execution and computation | `executor_new.py`, `calculator/` | Writable state separate from calculation services |
 | Persistence and isolation | `persistence/`, `runtime_databases.py` | Released seeds separate from writable runtime copies |
 | Presentation | `output_service.py`, `output_decoder.py`, `answer_verbalizer.py` | Rendering cannot reauthorize reasoning |
 
 Python paths without a directory prefix in this table are under `main_part/`.
 
-Released seeds are `data/demo/db/rule.sqlite` and `knowledge.sqlite`. [runtime_databases.py](../main_part/runtime_databases.py) creates `runtime/inference_*` copies using SQLite backup. Retrieval counts, indexes, and runtime Memory affect copies only. Explicit paths cannot bypass seed protection through symbolic or hard links. This inference-entry protection is not a universal permission restriction on every persistence utility or explicit publication tool.
+The default portable seed is `data/demo_v2/seed.json.gz`: 210 inference Rules and 106 Knowledge records, with counts and checksum in `manifest.json`. [demo_seed.py](../main_part/demo_seed.py) verifies and restores isolated `runtime/inference_*` SQLite stores, starting with empty Memory. The previous 191 Rules are retained and updated, with 19 generic inference Control additions. The seed excludes 36 learning Rules and 13 new broad financial-analysis Rules. The latter interfered with supply-chain candidate selection; exclusion is not a repair of their coexistence problem. Older `data/demo/db/` seeds remain explicit regression fixtures, not the default. Retrieval counters and indexes go to runtime stores; explicit paths cannot alias the older seeds through symlinks or hardlinks. Entry protection is not a universal permission policy over every persistence utility.
 
-This repository is an inference demo for two connected domains. It does not distribute the paper, experimental data, Auto-Learn, training tasks, a PRS compiler, visual input, or complete dynamic dependency maintenance. Operator contracts, hierarchical planning, production rules, and truth maintenance have established precedents. The design focus is their integration with semantic nomination, current Event state, and execution feedback, not a claim that each individual mechanism is unprecedented.
+This repository is an inference demo for two connected domains. It does not distribute the paper, experimental data, Auto-Learn, training tasks, a PRS compiler or visual input. Bounded composition and dynamic evidence maintenance have the scope described in Sections 6 and 10. Operator contracts, hierarchical planning, production rules, and truth maintenance have established precedents. The design focus is their integration with semantic nomination, current Event state, and execution feedback, not a claim that each individual mechanism is unprecedented.
 
 ## 16 Comparison with world models
 
@@ -268,7 +324,7 @@ ERS connects current facts to new results through executable Rules and checks pr
 
 Some hierarchical world models use predefined levels or learn hierarchical representations. Latent states alone need not directly identify a failed premise, conflicting rule, or changed logical dependency.
 
-ERS theory organizes control levels around the current task's dependency structure. Missing premises, new information, and execution failures can revise relevant subgoals and continuations rather than merely degrading the original path's output. Released selector delegation, strategy synchronization, and failure feedback are related foundations; full dynamic intermediate strategies and subgoal invocation/return are not included in this demo.
+ERS theory organizes control levels around the current task's dependency structure. Missing premises, new information, and execution failures can revise relevant subgoals and continuations rather than merely degrading the original path's output. The release supports selector delegation, strategy synchronization, failure feedback and declared sequential child calls/returns. These do not establish automatic intermediate-strategy generation or optimal hierarchy selection for arbitrary tasks.
 
 ### 16.3 Capability expansion and long-term maintenance
 
@@ -292,7 +348,7 @@ ERS records actual bindings, matching failures, execution outcomes, and sources.
 
 Facts and task constraints change. Without explicit dependencies, state prediction alone does not directly identify which conclusions are affected or which retain independent support.
 
-ERS theory retains object identity, validity periods, provenance, and derivation dependencies. Corrections, withdrawals, or invalidations prompt reassessment of affected support; a conclusion can survive through a valid independent justification. Withdrawal is not refutation, and losing one support is not losing every support. The demo contains computation sources, alignment fingerprints, and output-snapshot checks only; these do not establish released general invalidation propagation, independent-support maintenance, or rebinding.
+ERS theory retains object identity, validity periods, provenance, and derivation dependencies. Corrections, withdrawals, or invalidations prompt reassessment of affected support; a conclusion can survive through a valid independent justification. Withdrawal is not refutation, and losing one support is not losing every support. The demo implements part of this design through derivation supports, recursive validity checks, Control review, retained history and rebinding to recorded valid alternative supports. Its scope is integrated Event derivations and relations, not a complete ATMS or arbitrary external-operation dependency maintenance.
 
 ### 16.7 Evaluation of reasoning and acceptance of output
 
