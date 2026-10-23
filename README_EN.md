@@ -212,6 +212,22 @@ Final output requires gate approval, an unambiguous current Event, and valid res
 - **Training is not released.** Auto-Learn, training, and Rule reconstruction are excluded. Dynamic intermediate strategies, full subgoal invocation / return, and general evidence invalidation / rebinding are not released default capabilities either.
 - **No superiority claim.** Single-case time, Rule-step counts, or isolated experiments do not establish broadly better performance than other models. Results depend on Knowledge, Rules, inputs, and environment.
 
+## Citation
+
+If you find Reasoning-AI or the Event Reasoning System (ERS) useful in your research, please consider citing our [paper](https://arxiv.org/abs/2610.22403):
+
+```bibtex
+@misc{lyu2026eventsreasoning,
+  title         = {From Events to Reasoning: Hierarchical Rule Composition over Explicit States},
+  author        = {Cheng Lyu and Xueqi Wang},
+  year          = {2026},
+  eprint        = {2610.22403},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AI},
+  url           = {https://arxiv.org/abs/2610.22403}
+}
+```
+
 ## Contributing
 
 Use [Issues](https://github.com/LvCheng09/Reasoning-AI-demo-v0.1/issues) for reproducible problems, domain cases, and suggestions, or open a Pull Request.

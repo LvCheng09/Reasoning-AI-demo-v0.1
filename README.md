@@ -212,6 +212,22 @@ Demo 和默认 Python 入口先校验种子，再恢复到 `runtime/inference_*`
 - **没有发布训练部分。** Auto-Learn、训练和规则重构不在此版本中；动态中策略、完整子目标调用／返回、通用证据失效与重绑也不作为默认能力发布。
 - **没有性能胜出承诺。** 不用单题耗时、规则步数或隔离实验推断普遍优于其他模型；真实效果受知识、规则、输入和运行环境影响。
 
+## 引用
+
+如果 Reasoning-AI 或 Event Reasoning System（ERS）对你的研究有帮助，欢迎引用我们的[论文](https://arxiv.org/abs/2610.22403)：
+
+```bibtex
+@misc{lyu2026eventsreasoning,
+  title         = {From Events to Reasoning: Hierarchical Rule Composition over Explicit States},
+  author        = {Cheng Lyu and Xueqi Wang},
+  year          = {2026},
+  eprint        = {2610.22403},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AI},
+  url           = {https://arxiv.org/abs/2610.22403}
+}
+```
+
 ## 参与贡献
 
 欢迎通过 [Issues](https://github.com/LvCheng09/Reasoning-AI-demo-v0.1/issues) 提交可复现问题、领域案例与建议，或提交 Pull Request。
